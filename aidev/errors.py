@@ -1,0 +1,12 @@
+class PlatformError(Exception):
+    def __init__(self, code, message, exit_code=2, details=None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.exit_code = exit_code
+        self.details = details or {}
+
+
+class OperationalError(PlatformError):
+    def __init__(self, code, message, details=None):
+        super().__init__(code, message, exit_code=3, details=details)
