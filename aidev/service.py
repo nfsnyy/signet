@@ -189,7 +189,7 @@ def init_task(repository, workspace, title, requirement, owner, actor):
         f"Initialize {task_id}",
     )
     workspace.mkdir(parents=True, exist_ok=True)
-    for directory in ["contract", "evidence", "inbox", "outbox"]:
+    for directory in ["contract", "evidence", "inbox", "outbox", "outbox-collab"]:
         (workspace / directory).mkdir(exist_ok=True)
     write_task(workspace / "task.md", metadata, body)
     (workspace / "AGENTS.md").write_text(workspace_agents(metadata), encoding="utf-8", newline="\n")
@@ -273,6 +273,9 @@ def validate_report(report):
     for section in ("deviations", "collaboration_requests"):
         if any(not isinstance(item, dict) for item in report[section]):
             raise PlatformError("submit.invalid_report", f"{section} must contain objects")
+    for item in report["collaboration_requests"]:
+        if not isinstance(item.get("message_id"), str) or not item["message_id"].strip():
+            raise PlatformError("submit.invalid_report", "each collaboration_requests item must contain a message_id")
 
 
 def read_report(path):
@@ -444,7 +447,7 @@ def apply_claim(proposal, metadata):
     return event, (None, result)
 
 
-def apply_submit(proposal, metadata):
+def apply_submit(proposal, metadata, repository=None):
     if metadata.get("state") != "In Progress":
         return None, rejection(proposal, metadata, "submit.invalid_state", "authoritative task is not In Progress")
     code, message = base_is_current(proposal, metadata)
@@ -464,6 +467,9 @@ def apply_submit(proposal, metadata):
         for item in evidence:
             if not isinstance(item, dict) or not item.get("path") or not item.get("sha256"):
                 raise PlatformError("submit.invalid_evidence", "evidence must contain path and sha256")
+        if repository is not None:
+            from .collaboration import validate_report_collaboration
+            validate_report_collaboration(repository, proposal["task_id"], report)
     except PlatformError as error:
         return None, rejection(proposal, metadata, error.code, error.message)
     metadata["lease"] = None
@@ -642,7 +648,7 @@ def synchronize(repository, workspaces, actor, push=False):
             if operation == "claim":
                 accepted_event, outcome = apply_claim(proposal, metadata)
             elif operation == "submit":
-                accepted_event, outcome = apply_submit(proposal, metadata)
+                accepted_event, outcome = apply_submit(proposal, metadata, repository)
             elif operation == "block":
                 accepted_event, outcome = apply_block(proposal, metadata)
             elif operation == "enhancement":
@@ -662,6 +668,10 @@ def synchronize(repository, workspaces, actor, push=False):
             if rejected_event is not None:
                 new_events.append(rejected_event)
             results.append(result)
+        from .collaboration import process_collaboration_sync
+        collab_events, collab_paths, collab_results = process_collaboration_sync(repository, [Path(workspace).resolve() for workspace in workspaces])
+        new_events.extend(collab_events)
+        results.extend(collab_results)
         paths = []
         for task_id, (metadata, body) in changed_tasks.items():
             path = task_path(repository, task_id)
@@ -670,6 +680,7 @@ def synchronize(repository, workspaces, actor, push=False):
         if new_events:
             append_jsonl(events_file, new_events)
             paths.append(events_file.relative_to(repository))
+        paths.extend(collab_paths)
         commit = commit_paths(repository, paths, f"Sync {len(proposals)} proposal(s)", push=push) if paths else None
         refreshed_workspaces = set()
         for proposal in proposals:
@@ -686,9 +697,11 @@ def status(workspace):
     workspace = Path(workspace).resolve()
     metadata, _ = read_task(workspace / "task.md")
     inbox = workspace / "inbox"
+    outbox_collab = workspace / "outbox-collab"
     return {
         "task": metadata,
         "inbox": sorted(path.name for path in inbox.glob("*.json")) if inbox.is_dir() else [],
+        "outbox_collab": sorted(path.name for path in outbox_collab.glob("*.json")) if outbox_collab.is_dir() else [],
         "authoritative": False,
     }
 

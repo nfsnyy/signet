@@ -2,6 +2,7 @@ import argparse
 import json
 import sys
 
+from .collaboration import collab_answer, collab_send, collaboration_overview
 from .errors import PlatformError
 from .lifecycle import adjudicate_task, close_task, reject_task, verify_task, void_task
 from .service import block, claim, enhancement, init_repository, init_task, status, submit, synchronize, task_log
@@ -104,6 +105,9 @@ def parser_for(role):
         veto.add_argument("--withdraw", action="store_true")
         veto.add_argument("--list", action="store_true")
         veto.add_argument("--push", action="store_true")
+        inbox = subparsers.add_parser("inbox")
+        inbox.add_argument("--repo", required=True)
+        inbox.add_argument("--task-id")
     else:
         claim_parser = subparsers.add_parser("claim")
         claim_parser.add_argument("--workspace", required=True)
@@ -129,6 +133,21 @@ def parser_for(role):
         enhancement_parser.add_argument("--details", required=True)
         status_parser = subparsers.add_parser("status")
         status_parser.add_argument("--workspace", required=True)
+        collab_send_parser = subparsers.add_parser("collab-send")
+        collab_send_parser.add_argument("--workspace", required=True)
+        collab_send_parser.add_argument("--actor", required=True)
+        collab_send_parser.add_argument("--on-behalf-of", required=True)
+        collab_send_parser.add_argument("--type", choices=["in-spec-request", "definition-doubt", "new-scope"], required=True)
+        collab_send_parser.add_argument("--to-task", required=True)
+        collab_send_parser.add_argument("--summary", required=True)
+        collab_send_parser.add_argument("--details", required=True)
+        collab_answer_parser = subparsers.add_parser("collab-answer")
+        collab_answer_parser.add_argument("--workspace", required=True)
+        collab_answer_parser.add_argument("--actor", required=True)
+        collab_answer_parser.add_argument("--on-behalf-of", required=True)
+        collab_answer_parser.add_argument("--message-id", required=True)
+        collab_answer_parser.add_argument("--action", choices=["accept", "reject", "counter", "escalate", "close"], required=True)
+        collab_answer_parser.add_argument("--note")
     log_parser = subparsers.add_parser("log")
     log_parser.add_argument("--repo", required=True)
     log_parser.add_argument("--task-id", required=True)
@@ -183,6 +202,12 @@ def dispatch(role, arguments):
         return decide_veto(arguments.repo, arguments.veto_id, "withdraw", arguments.actor, None, arguments.push)
     if arguments.command == "status":
         return status(arguments.workspace)
+    if arguments.command == "collab-send":
+        return collab_send(arguments.workspace, arguments.actor, arguments.on_behalf_of, arguments.type, arguments.to_task, arguments.summary, arguments.details)
+    if arguments.command == "collab-answer":
+        return collab_answer(arguments.workspace, arguments.actor, arguments.on_behalf_of, arguments.message_id, arguments.action, arguments.note)
+    if arguments.command == "inbox":
+        return collaboration_overview(arguments.repo, arguments.task_id)
     if arguments.command == "log":
         return {"events": task_log(arguments.repo, arguments.task_id)}
     raise PlatformError("operation.unsupported", f"unsupported command: {arguments.command}")
