@@ -668,3 +668,75 @@ init-task → freeze → claim → sync → submit → sync → verify → close
 - C1/C2/C3 与报告/证据闸门已经能拒绝对应缺陷输入。
 - 当前结果只支持进入下一阶段开发，不支持开始 dogfood。
 - 下一优先级是实现 `verify / reject / close / void / adjudicate`，随后补齐 C5、干净验收环境和规格修订，而不是先做页面或服务端。
+
+
+---
+
+## 14. 生命周期实施状态
+
+> 本节记录 `block / enhancement / verify / reject / close / void / adjudicate` 的当前原型能力，不代表真实用例执行器已经完成。
+
+### 14.1 已新增命令
+
+**agent 入口：**
+
+- `block`：要求任务为 In Progress、租约有效且属于当前 actor，必须附原因和非空证据；sync 接受后进入 Blocked、释放租约并打开讨论条目。
+- `enhancement`：要求任务为 In Progress 且当前 actor 持有租约；sync 只记录事件，不改变任务状态、规格或范围。
+
+**operator 入口：**
+
+- `verify`：读取独立初验结果，校验任务状态、pin、验收标准全覆盖、每条证据、安全否决项人工重跑记录、初验者/confirm 者不同、实现者不得自验自签；全部通过后才置为 Verified。
+- `reject`：从 Implemented 退回 Ready（实现问题）或置 Void（输入问题）；可传 `--workspace` 刷新 agent 工作区。
+- `close`：Verified 可接受为 Done；拒收时保持 Verified 并记录异议。
+- `void`：支持取消、规格作废波及、定义缺陷；定义缺陷会触发规格版本作废。
+- `adjudicate`：Blocked 可裁决为实现问题并回 Ready，或定义为定义缺陷并触发规格作废；可传 `--workspace` 刷新源任务工作区。
+
+### 14.2 当前验证结果 JSON
+
+```json
+{
+  "verifier": "verifier-agent",
+  "spec_pin": {},
+  "results": [
+    {
+      "criterion_id": "AC-001",
+      "passed": true,
+      "evidence": [{"path": "evidence.txt", "sha256": "..."}]
+    }
+  ]
+}
+```
+
+安全否决项还必须包含：
+
+```json
+{
+  "criterion_id": "SAFE-001",
+  "passed": true,
+  "evidence": [{"path": "machine.txt", "sha256": "..."}],
+  "manual_rerun": {
+    "command": ["python", "verify_safe.py"],
+    "evidence": [{"path": "manual.txt", "sha256": "..."}]
+  }
+}
+```
+
+### 14.3 已验证行为
+
+- enhancement 不扩大当前任务范围。
+- block 接受后进入 Blocked，租约被释放。
+- 实现问题裁决和实现问题 reject 会回 Ready，并能刷新 agent 工作区。
+- 实现者不能作为 verifier 或 confirm 者。
+- 包含失败标准、缺标准、pin 不一致或安全项无人工重跑的结果不能 verify。
+- 初验与 confirm 是两条独立事件；accept close 才进入 Done，close reject 不进入 Done。
+- 输入问题 reject 会把任务置 Void。
+- 定义缺陷裁决会写入 `INVALID.json`，把同一 pin 的 Ready/In Progress/Implemented/Verified/Blocked 任务置 Void。
+- Done 不因规格作废回退，但会记录追溯审查事件并生成 Draft 追溯审查任务。
+
+### 14.4 当前明确边界
+
+- `verify` 只校验并记录外部独立初验结果，尚不在干净环境中自动执行钉扎契约用例。
+- `reject` 当前只支持从 Implemented 发起。
+- `void --reason definition-defect` 尚不接受自定义重冻结归因字段。
+- 追溯审查任务只生成 Draft 任务与事件，尚未自动关联完整审计包。
+- `veto.downgrade`、协作消息自动路由和 C5 真实执行仍未实现。

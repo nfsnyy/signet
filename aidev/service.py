@@ -247,6 +247,65 @@ def submit(workspace, actor, on_behalf_of, report_file, evidence_files):
     return {"proposal_id": proposal_id, "task_id": metadata["task_id"], "authoritative": False}
 
 
+def validate_active_lease(metadata, actor, operation):
+    lease = metadata.get("lease") or {}
+    if not lease_is_active(lease):
+        raise PlatformError(f"{operation}.lease_expired", "task lease is not active")
+    if lease.get("claimed_by") != actor:
+        raise PlatformError(f"{operation}.lease_owner_mismatch", "only the lease holder can perform this operation")
+
+
+def block(workspace, actor, on_behalf_of, reason, evidence_files):
+    workspace = Path(workspace).resolve()
+    metadata, _ = read_task(workspace / "task.md")
+    if metadata.get("state") != "In Progress":
+        raise PlatformError("block.invalid_state", "only an In Progress task can be blocked", details={"state": metadata.get("state")})
+    validate_active_lease(metadata, actor, "block")
+    if not reason or not reason.strip():
+        raise PlatformError("block.reason_required", "block reason is required")
+    evidence = evidence_manifest(evidence_files)
+    proposal_id = new_id("proposal")
+    proposal = {
+        "proposal_id": proposal_id,
+        "task_id": metadata["task_id"],
+        "operation": "block",
+        "actor": actor,
+        "on_behalf_of": on_behalf_of,
+        "created_at": utc_now(),
+        "base": proposal_base(metadata),
+        "parameters": {"reason": reason, "evidence": evidence},
+        "workspace": str(workspace),
+        "local_validation": {"result": "passed", "checked_at": utc_now()},
+    }
+    write_json(workspace / "outbox" / f"{proposal_id}.json", proposal)
+    return {"proposal_id": proposal_id, "task_id": metadata["task_id"], "authoritative": False}
+
+
+def enhancement(workspace, actor, on_behalf_of, title, details):
+    workspace = Path(workspace).resolve()
+    metadata, _ = read_task(workspace / "task.md")
+    if metadata.get("state") != "In Progress":
+        raise PlatformError("enhancement.invalid_state", "only an In Progress task can record an enhancement", details={"state": metadata.get("state")})
+    validate_active_lease(metadata, actor, "enhancement")
+    if not title or not title.strip() or not details or not details.strip():
+        raise PlatformError("enhancement.details_required", "title and details are required")
+    proposal_id = new_id("proposal")
+    proposal = {
+        "proposal_id": proposal_id,
+        "task_id": metadata["task_id"],
+        "operation": "enhancement",
+        "actor": actor,
+        "on_behalf_of": on_behalf_of,
+        "created_at": utc_now(),
+        "base": proposal_base(metadata),
+        "parameters": {"title": title, "details": details},
+        "workspace": str(workspace),
+        "local_validation": {"result": "passed", "checked_at": utc_now()},
+    }
+    write_json(workspace / "outbox" / f"{proposal_id}.json", proposal)
+    return {"proposal_id": proposal_id, "task_id": metadata["task_id"], "authoritative": False}
+
+
 def rejection(proposal, metadata, code, message):
     task_id = proposal["task_id"]
     event = make_event(
@@ -345,6 +404,74 @@ def apply_submit(proposal, metadata):
     return event, (None, result)
 
 
+def apply_block(proposal, metadata):
+    if metadata.get("state") != "In Progress":
+        return None, rejection(proposal, metadata, "block.invalid_state", "authoritative task is not In Progress")
+    code, message = base_is_current(proposal, metadata)
+    if code:
+        return None, rejection(proposal, metadata, code, message)
+    lease = metadata.get("lease") or {}
+    if not lease_is_active(lease):
+        return None, rejection(proposal, metadata, "block.lease_expired", "authoritative lease is not active")
+    if lease.get("claimed_by") != proposal.get("actor"):
+        return None, rejection(proposal, metadata, "block.lease_owner_mismatch", "proposal actor does not hold the lease")
+    reason = proposal.get("parameters", {}).get("reason")
+    evidence = proposal.get("parameters", {}).get("evidence")
+    if not reason or not evidence:
+        return None, rejection(proposal, metadata, "block.invalid_payload", "block reason and evidence are required")
+    metadata["lease"] = None
+    metadata["updated_at"] = utc_now()
+    metadata["state"] = "Blocked"
+    blocked_event = make_event(
+        "task.blocked",
+        proposal["task_id"],
+        proposal["actor"],
+        proposal["on_behalf_of"],
+        "In Progress",
+        "Blocked",
+        proposal_id=proposal["proposal_id"],
+        payload={"reason": reason, "evidence": evidence},
+        entrypoint="agent",
+    )
+    discussion_event = make_event(
+        "discussion.opened",
+        proposal["task_id"],
+        "operator",
+        proposal["on_behalf_of"],
+        "Blocked",
+        "Blocked",
+        proposal_id=proposal["proposal_id"],
+        payload={"topic": "block", "reason": reason},
+    )
+    result = {"proposal_id": proposal["proposal_id"], "accepted": True, "state": "Blocked"}
+    return [blocked_event, discussion_event], (None, result)
+
+
+def apply_enhancement(proposal, metadata):
+    if metadata.get("state") != "In Progress":
+        return None, rejection(proposal, metadata, "enhancement.invalid_state", "authoritative task is not In Progress")
+    code, message = base_is_current(proposal, metadata)
+    if code:
+        return None, rejection(proposal, metadata, code, message)
+    title = proposal.get("parameters", {}).get("title")
+    details = proposal.get("parameters", {}).get("details")
+    if not title or not details:
+        return None, rejection(proposal, metadata, "enhancement.invalid_payload", "title and details are required")
+    event = make_event(
+        "enhancement.recorded",
+        proposal["task_id"],
+        proposal["actor"],
+        proposal["on_behalf_of"],
+        "In Progress",
+        "In Progress",
+        proposal_id=proposal["proposal_id"],
+        payload={"title": title, "details": details},
+        entrypoint="agent",
+    )
+    result = {"proposal_id": proposal["proposal_id"], "accepted": True, "state": "In Progress"}
+    return event, (None, result)
+
+
 def collect_expired_leases(repository, changed_tasks, new_events):
     tasks_directory = repository / "tasks"
     if not tasks_directory.is_dir():
@@ -435,13 +562,20 @@ def synchronize(repository, workspaces, actor, push=False):
                 accepted_event, outcome = apply_claim(proposal, metadata)
             elif operation == "submit":
                 accepted_event, outcome = apply_submit(proposal, metadata)
+            elif operation == "block":
+                accepted_event, outcome = apply_block(proposal, metadata)
+            elif operation == "enhancement":
+                accepted_event, outcome = apply_enhancement(proposal, metadata)
             else:
                 event, result = rejection(proposal, metadata, "operation.unsupported", "operation is not implemented")
                 new_events.append(event)
                 results.append(result)
                 continue
             if accepted_event is not None:
-                new_events.append(accepted_event)
+                if isinstance(accepted_event, list):
+                    new_events.extend(accepted_event)
+                else:
+                    new_events.append(accepted_event)
                 changed_tasks[proposal["task_id"]] = (metadata, body)
             rejected_event, result = outcome
             if rejected_event is not None:
