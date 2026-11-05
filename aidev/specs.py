@@ -1,11 +1,14 @@
 import json
 import os
 import shutil
+import stat
+import time
 from pathlib import Path
 
 from .errors import OperationalError, PlatformError
 from .gitrepo import commit_paths, ensure_repository
 from .jsonio import append_jsonl, sha256_file, utc_now
+from .runner import execute_contract_cases
 from .service import SPEC_FILES, event_path, make_event, task_path, workspace_agents
 from .taskfile import read_task, write_task
 
@@ -234,8 +237,74 @@ def validate_three_piece(card, contract, mapping, operation_source, contract_fil
     contract_type = contract.get("contract_type")
     if contract_type not in VALID_CONTRACT_TYPES:
         raise PlatformError("c4.invalid_contract_type", "contract_type must be baseline or target")
-    if contract_type == "baseline":
-        raise PlatformError("c5.not_implemented", "baseline contracts require real-environment C5 evidence, which is not implemented yet")
+
+
+def write_baseline_evidence(spec_directory, case_results):
+    evidence_directory = Path(spec_directory) / "baseline-evidence"
+    evidence_directory.mkdir(parents=True, exist_ok=True)
+    records = []
+    paths = []
+    for case_id, result in case_results.items():
+        evidence = result["evidence"]
+        target = evidence_directory / evidence["filename"]
+        target.write_bytes(evidence["content"])
+        relative = target.relative_to(spec_directory.parents[2]).as_posix()
+        paths.append(relative)
+        records.append({
+            "case_id": case_id,
+            "passed": result["passed"],
+            "exit_code": result["exit_code"],
+            "evidence": {"path": relative, "sha256": evidence["sha256"]},
+        })
+    return records, paths
+
+
+def remove_uncommitted_spec(spec_directory):
+    path = Path(spec_directory)
+    if not path.exists():
+        return
+
+    def make_writable(function, target, _error):
+        try:
+            os.chmod(target, stat.S_IWRITE)
+        except OSError:
+            pass
+        function(target)
+
+    last_error = None
+    for _attempt in range(5):
+        try:
+            shutil.rmtree(path, onerror=make_writable)
+            break
+        except PermissionError as error:
+            last_error = error
+            time.sleep(0.1)
+    else:
+        raise OperationalError("freeze.cleanup_failed", "failed to clean uncommitted frozen spec", details={"path": str(path), "error": str(last_error)})
+    parent = path.parent
+    while parent.name != "specs" and parent.exists():
+        try:
+            parent.rmdir()
+        except OSError:
+            break
+        parent = parent.parent
+
+
+def execute_baseline_cases(repository, spec_directory, metadata, contract, pin):
+    provisional_metadata = dict(metadata)
+    provisional_metadata["spec_id"] = pin["spec_id"]
+    provisional_metadata["spec_pin"] = pin
+    try:
+        case_results = execute_contract_cases(repository, provisional_metadata)
+        records, evidence_paths = write_baseline_evidence(spec_directory, case_results)
+    except BaseException:
+        remove_uncommitted_spec(spec_directory)
+        raise
+    failed = [record["case_id"] for record in records if not record["passed"]]
+    if failed:
+        remove_uncommitted_spec(spec_directory)
+        raise PlatformError("c5.case_failed", "baseline contract has failing cases", details={"cases": failed})
+    return records, evidence_paths
 
 
 def freeze_task(repository, task_id, workspace, card_file, contract_file, mapping_file, operation_source, h1_actor, h2_actor, push=False):
@@ -272,11 +341,18 @@ def freeze_task(repository, task_id, workspace, card_file, contract_file, mappin
             copied.append(target.relative_to(repository))
             pin[key] = {"version": version, "sha256": sha256_file(target)}
         copy_contract_assets(contract, contract_file, spec_directory, copied)
+        baseline_records = []
+        baseline_paths = []
+        if contract.get("contract_type") == "baseline":
+            baseline_records, baseline_paths = execute_baseline_cases(repository, spec_directory, metadata, contract, pin)
+            copied.extend(baseline_paths)
         now = utc_now()
         events = [
             make_event("specification.content_confirmed", task_id, h1_actor, h1_actor, "Draft", "Draft", payload={"spec_id": spec_id, "version": version, "sha256": pin["acceptance_card"]["sha256"]}),
             make_event("specification.consistency_confirmed", task_id, h2_actor, h2_actor, "Draft", "Draft", payload={"spec_id": spec_id, "version": version, "contract_sha256": pin["contract"]["sha256"], "mapping_sha256": pin["mapping"]["sha256"]}),
         ]
+        if baseline_records:
+            events.append(make_event("specification.baseline_verified", task_id, h2_actor, h2_actor, "Draft", "Draft", payload={"spec_id": spec_id, "version": version, "cases": baseline_records}))
         metadata["spec_pin"] = pin
         metadata["updated_at"] = now
         metadata["state"] = "Ready"

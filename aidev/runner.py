@@ -7,7 +7,6 @@ from pathlib import Path
 
 from .errors import PlatformError
 from .jsonio import read_json, sha256_file
-from .specs import contract_asset_paths, safe_relative_path
 from .service import spec_path
 
 COMMAND_TIMEOUT_SECONDS = 60
@@ -20,6 +19,7 @@ def frozen_contract(repository, metadata):
 
 
 def validate_frozen_assets(spec_directory, contract):
+    from .specs import contract_asset_paths, safe_relative_path
     asset_hashes = contract.get("assets", {})
     for asset in contract_asset_paths(contract):
         relative = safe_relative_path(asset, "verify.invalid_asset")
@@ -64,6 +64,7 @@ def run_clean_command(command, cwd, environment):
 
 
 def copy_frozen_assets(spec_directory, temporary_directory, contract):
+    from .specs import contract_asset_paths, safe_relative_path
     for asset in contract_asset_paths(contract):
         relative = safe_relative_path(asset, "verify.invalid_asset")
         source = Path(spec_directory) / relative

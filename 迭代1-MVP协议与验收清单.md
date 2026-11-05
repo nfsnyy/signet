@@ -575,7 +575,7 @@ init-task → freeze → claim → sync → submit → sync → verify → close
 
 ### 13.1 已新增能力
 
-- `operator freeze`：读取验收卡、契约、映射表，执行当前可用的 C1/C2/C3 检查，拒绝 baseline C5，生成规格版本与 pin，刷新任务和 agent 工作区。
+- `operator freeze`：读取验收卡、契约、映射表，执行 C1–C5；其中 baseline 会在冻结前执行用例并保存证据，target 生成规格版本与 pin，并刷新任务和 agent 工作区。
 - `agent submit`：校验任务必须处于 In Progress、租约必须属于当前 actor，校验四段式 JSON 报告和非空证据文件，生成 outbox 提案。
 - `operator sync`：支持 `claim` 与 `submit` 两类提案，重新校验租约、pin、任务基准版本和报告格式，成功后释放租约并把任务置为 Implemented。
 - `operator sync`：处理完成后刷新参与同步的 agent 工作区，使工作区状态与权威任务一致。
@@ -639,17 +639,17 @@ init-task → freeze → claim → sync → submit → sync → verify → close
 - C1 能拒绝未被映射覆盖的验收标准。
 - C2 能拒绝契约声明操作集与实际用例覆盖不一致。
 - C3 能拒绝缺失 fixture。
-- baseline 契约在 C5 真实环境证据能力未实现前会被明确拒绝，不会假装通过。
+- baseline 契约在 C5 用例全部执行通过前会被拒冻；通过后证据随规格版本一起提交。
 - submit 能拒绝缺少固定报告段落的报告和空证据文件。
 - 提交证据只把路径、大小和 SHA-256 写入事件，不把 agent 工作区的证据文件复制进权威仓库。
 
 ### 13.4 当前明确边界
 
-- C3 目前完成结构和引用检查；尚未执行网络端点活性检查或干净环境重建。
-- C5 只实现“诚实拒绝”，尚未实现 baseline 在真实环境运行并收集证据。
+- C3 已完成结构、资产哈希和引用检查；尚未执行网络端点活性检查。
+- C5 已支持 baseline 在受控执行环境中运行用例并保存证据。
 - 尚未实现规格修订和重冻结；同一 `spec_id` 只能冻结第一个版本。
-- 尚未实现 `verify`、`reject`、`close`、`void`、`adjudicate`、block 和 enhancement。
-- 尚未实现验收用例自动执行；当前 `Implemented` 只证明 agent 按格式提交且证据非空，不证明结果正确。
+- `verify`、`reject`、`close`、`void`、`adjudicate`、block 和 enhancement 已在后续阶段实现。
+- `verify --execute` 已支持钉扎契约机器用例自动执行；安全否决项仍需人工重跑。
 - 尚未实现远端冲突时的重新验证与恢复流程。
 
 
@@ -739,7 +739,7 @@ init-task → freeze → claim → sync → submit → sync → verify → close
 - `reject` 当前只支持从 Implemented 发起。
 - `void --reason definition-defect` 尚不接受自定义重冻结归因字段。
 - 追溯审查任务只生成 Draft 任务与事件，尚未自动关联完整审计包。
-- `veto.downgrade`、协作消息自动路由和 C5 真实执行仍未实现。
+- `veto.downgrade` 和协作消息自动路由仍未实现；C5 baseline 执行与证据保存已实现。
 
 
 ---
@@ -805,8 +805,42 @@ init-task → freeze → claim → sync → submit → sync → verify → close
 - 尚未实现依赖版本解析器或包管理器抽象；复杂依赖仍通过 `setup_command` 显式表达。
 - 安全否决项不能仅由机器初验自动通过，仍需人工重跑证据。
 - 人工验收标准在 `--execute` 模式下必须通过 `--manual-results` 提供。
-- C5 baseline 真实运行仍未实现。
+- C5 baseline 已在冻结阶段执行；这里的“真实环境”当前仍由契约环境规格与受控执行器表达，尚未做端点网络探测。
 
 ### 15.6 仓库内容策略
 
 本协议文档继续保留在仓库中，因为它与 CLI、JSON 协议和验收清单共同构成当前实现的事实说明。阶段实施日志后续可以拆分到 `docs/development-log.md`，但在形成稳定协议前不移动现有文件。
+
+
+---
+
+## 16. C5 baseline 执行实施状态
+
+### 16.1 已实现
+
+- `baseline` 契约不再被占位拒绝。
+- `freeze` 在生成规格版本后，先用同一套执行器运行 baseline 全部用例。
+- 用例全部通过时：
+
+  - 输出写入 `specs/<spec-id>/<version>/baseline-evidence/<case-id>.log`；
+  - 证据路径和 SHA-256 写入 `specification.baseline_verified` 事件；
+  - 证据随规格版本一起提交。
+
+- 任一用例失败时：
+
+  - freeze 返回 `c5.case_failed`；
+  - 未提交的规格版本和空父目录会被清理；
+  - 不产生新的权威提交。
+
+### 16.2 已验证行为
+
+- baseline 用例全部通过后可以冻结，证据存在且已提交。
+- baseline 用例输出不满足 `expect` 时拒绝冻结。
+- baseline 失败后不会留下未提交的规格目录。
+- 清理过程不再静默吞掉权限错误；无法清理会显式返回 `freeze.cleanup_failed`。
+
+### 16.3 当前边界
+
+- baseline 当前使用与 verify 相同的受控执行器；尚未增加端点网络探测。
+- 复杂真实环境仍依赖契约中的 runner、资产和 `setup_command` 显式描述。
+- 标签从 baseline 改为 target 的重冻结流程仍未实现。
