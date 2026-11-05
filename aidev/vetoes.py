@@ -3,10 +3,11 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from .domain import REFREEZABLE_STATES, event_path, make_event, parse_time, task_path
 from .errors import OperationalError, PlatformError
 from .gitrepo import commit_paths, ensure_repository
 from .jsonio import append_jsonl, new_id, read_jsonl, sha256_file, utc_now
-from .service import REFREEZABLE_STATES, event_path, make_event, parse_time, stamp_events, task_path
+from .service import stamp_events
 from .taskfile import read_task
 
 SAFETY_STRENGTH = "safety-veto"

@@ -5,9 +5,9 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from .domain import spec_path
 from .errors import PlatformError
 from .jsonio import read_json, sha256_file
-from .service import spec_path
 
 COMMAND_TIMEOUT_SECONDS = 60
 

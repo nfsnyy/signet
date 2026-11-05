@@ -2,21 +2,23 @@ import json
 import os
 from pathlib import Path
 
+from .domain import (
+    VOIDABLE_BY_SPEC_INVALIDATION,
+    event_path,
+    invalid_marker_path,
+    make_event,
+    same_pin,
+    task_path,
+)
 from .errors import OperationalError, PlatformError
 from .gitrepo import commit_paths, ensure_repository
 from .jsonio import append_jsonl, read_json, read_jsonl, utc_now
 from .runner import execute_contract_cases, frozen_contract, machine_criterion_results
 from .service import (
-    VOIDABLE_BY_SPEC_INVALIDATION,
     create_trace_review_task,
-    event_path,
-    invalid_marker_path,
-    make_event,
     propagate_pin_invalidation,
     refresh_workspace,
-    same_pin,
     stamp_events,
-    task_path,
 )
 from .specs import repository_lock
 from .taskfile import read_task, write_task

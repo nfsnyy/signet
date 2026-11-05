@@ -5,11 +5,12 @@ import stat
 import time
 from pathlib import Path
 
+from .domain import REFREEZABLE_STATES, SPEC_FILES, event_path, make_event, task_path, workspace_agents
 from .errors import OperationalError, PlatformError
 from .gitrepo import commit_paths, ensure_repository
 from .jsonio import append_jsonl, sha256_file, utc_now, write_json
 from .runner import execute_contract_cases
-from .service import REFREEZABLE_STATES, SPEC_FILES, event_path, make_event, propagate_pin_invalidation, stamp_events, task_path, workspace_agents
+from .service import propagate_pin_invalidation, stamp_events
 from .taskfile import read_task, write_task
 from .vetoes import approved_veto_for, classify_refreeze, latest_vetoes, veto_log_path
 

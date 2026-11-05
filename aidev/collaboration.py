@@ -3,7 +3,7 @@ from pathlib import Path
 
 from .errors import PlatformError
 from .jsonio import new_id, read_json, read_jsonl, utc_now, write_json
-from .service import event_path, make_event, task_path
+from .domain import event_path, make_event, task_path
 from .taskfile import read_task
 
 VALID_TYPES = {"in-spec-request", "definition-doubt", "new-scope"}

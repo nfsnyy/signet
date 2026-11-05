@@ -3,9 +3,10 @@ import json
 import sys
 
 from .collaboration import collab_answer, collab_send, collaboration_overview
+from .domain import validate_actor_alias
 from .errors import PlatformError
 from .lifecycle import adjudicate_task, close_task, reject_task, verify_task, void_task
-from .service import block, claim, enhancement, init_repository, init_task, status, submit, synchronize, task_log, validate_actor_alias
+from .service import block, claim, enhancement, init_repository, init_task, status, submit, synchronize, task_log
 from .specs import freeze_task, refreeze_task
 from .vetoes import decide_veto, list_vetoes, propose_veto, settle_expired_vetoes
 
