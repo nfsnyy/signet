@@ -68,3 +68,49 @@ def commit_paths(repository, paths, message, push=False):
     if push:
         run_git(repository, ["push", "origin", "main"])
     return run_git(repository, ["rev-parse", "HEAD"]).stdout.strip()
+
+
+def has_origin(repository):
+    return run_git(repository, ["remote", "get-url", "origin"], check=False).returncode == 0
+
+
+def fetch_origin(repository):
+    run_git(repository, ["fetch", "origin"])
+
+
+def ref_exists(repository, reference):
+    return run_git(repository, ["rev-parse", "--verify", reference], check=False).returncode == 0
+
+
+def current_head(repository):
+    return run_git(repository, ["rev-parse", "HEAD"]).stdout.strip()
+
+
+def is_ancestor(repository, ancestor, descendant):
+    return run_git(repository, ["merge-base", "--is-ancestor", ancestor, descendant], check=False).returncode == 0
+
+
+def ensure_remote_syncable(repository):
+    if not has_origin(repository):
+        return
+    fetch_origin(repository)
+    local_head = current_head(repository)
+    upstream_head_ref = "refs/remotes/origin/main"
+    if not ref_exists(repository, upstream_head_ref):
+        return
+    upstream_head = run_git(repository, ["rev-parse", upstream_head_ref]).stdout.strip()
+    if local_head == upstream_head:
+        return
+    if is_ancestor(repository, local_head, upstream_head):
+        raise OperationalError(
+            "sync.behind_remote",
+            "authoritative repository is behind origin/main; fetch or rebase before syncing",
+            {"local": local_head, "remote": upstream_head},
+        )
+    if is_ancestor(repository, upstream_head, local_head):
+        return
+    raise OperationalError(
+        "sync.diverged_remote",
+        "authoritative repository diverged from origin/main; resolve history before syncing",
+        {"local": local_head, "remote": upstream_head},
+    )

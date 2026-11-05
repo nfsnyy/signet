@@ -208,18 +208,21 @@ def reject_task(repository, task_id, category, reason, actor, workspace=None, pu
         if not path.is_file():
             raise PlatformError("task.not_found", f"task does not exist: {task_id}")
         metadata, body = read_task(path)
-        if metadata.get("state") != "Implemented":
-            raise PlatformError("reject.invalid_state", "current reject implementation only supports Implemented tasks", details={"state": metadata.get("state")})
+        before = metadata.get("state")
         if category == "implementation":
+            if before != "Implemented":
+                raise PlatformError("reject.invalid_state", "implementation rejection requires an Implemented task", details={"state": before})
             metadata["state"] = "Ready"
             metadata["lease"] = None
             metadata["void_reason"] = None
-            event = make_event("task.rejected", task_id, actor, actor, "Implemented", "Ready", payload={"category": category, "reason": reason})
+            event = make_event("task.rejected", task_id, actor, actor, before, "Ready", payload={"category": category, "reason": reason})
         else:
+            if before not in {"Ready", "In Progress", "Implemented"}:
+                raise PlatformError("reject.invalid_state", "input rejection requires Ready, In Progress, or Implemented", details={"state": before})
             metadata["state"] = "Void"
             metadata["lease"] = None
             metadata["void_reason"] = "input-defect"
-            event = make_event("task.void", task_id, actor, actor, "Implemented", "Void", payload={"category": category, "reason": reason})
+            event = make_event("task.void", task_id, actor, actor, before, "Void", payload={"category": category, "reason": reason})
         metadata["updated_at"] = utc_now()
         result = persist(repository, {task_id: (metadata, body)}, [event], [], f"Reject {task_id}", push)
         if workspace:

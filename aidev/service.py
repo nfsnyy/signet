@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .errors import OperationalError, PlatformError
-from .gitrepo import commit_paths, ensure_repository, initialize_repository
+from .gitrepo import commit_paths, ensure_remote_syncable, ensure_repository, initialize_repository
 from .jsonio import append_jsonl, new_id, read_json, read_jsonl, sha256_file, utc_now, write_json
 from .taskfile import read_task, write_task
 
@@ -527,6 +527,7 @@ def synchronize(repository, workspaces, actor, push=False):
         raise OperationalError("sync.already_running", "another sync holds the repository lock") from error
     os.close(descriptor)
     try:
+        ensure_remote_syncable(repository)
         proposals = []
         for workspace in workspaces:
             outbox = Path(workspace).resolve() / "outbox"

@@ -138,3 +138,32 @@ class LifecycleTests(WorkflowTestCase):
             "--category", "input", "--reason", "输入前提无效", "--actor", "architect",
         ])
         self.assertEqual("Void", self.task_state(repository, reject_task))
+
+    def test_reject_input_is_allowed_from_ready_and_in_progress_only(self):
+        repository, _ = self.init_state_repo()
+        ready_workspace, ready_task, _ = self.init_task(repository, "reject-ready")
+        self.freeze_target(repository, ready_workspace, ready_task)
+        self.operator([
+            "reject", "--repo", repository, "--task-id", ready_task,
+            "--category", "input", "--reason", "Ready 输入无效", "--actor", "architect",
+        ])
+        self.assertEqual("Void", self.task_state(repository, ready_task))
+
+        progress_workspace, progress_task, _ = self.init_task(repository, "reject-progress")
+        self.freeze_target(repository, progress_workspace, progress_task)
+        self.claim_and_sync(repository, progress_workspace)
+        self.assertEqual("In Progress", self.task_state(repository, progress_task))
+        result = self.operator([
+            "reject", "--repo", repository, "--task-id", progress_task,
+            "--category", "implementation", "--reason", "错误分类", "--actor", "verifier-a",
+        ], expected_exit=2)
+        self.assertEqual("reject.invalid_state", result["error"]["code"])
+        self.operator([
+            "reject", "--repo", repository, "--task-id", progress_task,
+            "--category", "input", "--reason", "In Progress 输入无效", "--actor", "architect",
+            "--workspace", progress_workspace,
+        ])
+        metadata, _ = self.read_task(Path(repository) / "tasks" / progress_task / "task.md")
+        self.assertEqual("Void", metadata["state"])
+        self.assertIsNone(metadata["lease"])
+        self.assertEqual("Void", self.read_task(Path(progress_workspace) / "task.md")[0]["state"])

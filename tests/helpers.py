@@ -77,6 +77,7 @@ class WorkflowTestCase(unittest.TestCase):
         self.operator(["init-repository", "--repo", repository, "--actor", "owner"])
         self.git(["init", "--bare", remote])
         self.git(["-C", repository, "remote", "add", "origin", remote])
+        self.git(["-C", repository, "push", "-u", "origin", "main"])
         return repository, remote
 
     def init_task(self, repository, name):
