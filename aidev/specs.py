@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .errors import OperationalError, PlatformError
 from .gitrepo import commit_paths, ensure_repository
-from .jsonio import append_jsonl, sha256_file, utc_now
+from .jsonio import append_jsonl, sha256_file, utc_now, write_json
 from .runner import execute_contract_cases
 from .service import SPEC_FILES, event_path, make_event, task_path, workspace_agents
 from .taskfile import read_task, write_task
@@ -370,5 +370,97 @@ def freeze_task(repository, task_id, workspace, card_file, contract_file, mappin
         for key, filename in SPEC_FILES.items():
             shutil.copyfile(spec_directory / filename, workspace / "contract" / filename)
         return {"task_id": task_id, "spec_id": spec_id, "version": version, "spec_pin": pin, "state": "Ready", "commit": commit}
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+REFREEZABLE_STATES = {"Ready", "In Progress", "Implemented", "Blocked"}
+
+
+def refreeze_task(repository, task_id, workspace, card_file, contract_file, mapping_file, operation_source, h1_actor, h2_actor, reason, push=False):
+    repository = ensure_repository(repository)
+    workspace = Path(workspace).resolve()
+    if not reason or not reason.strip():
+        raise PlatformError("refreeze.reason_required", "refreeze reason is required")
+    lock = repository_lock(repository, "freeze")
+    try:
+        path = task_path(repository, task_id)
+        if not path.is_file():
+            raise PlatformError("task.not_found", f"task does not exist: {task_id}")
+        metadata, body = read_task(path)
+        pin = metadata.get("spec_pin")
+        if not pin:
+            raise PlatformError("refreeze.no_spec", "task has no frozen specification; use freeze instead", details={"state": metadata.get("state")})
+        before = metadata.get("state")
+        if before not in REFREEZABLE_STATES:
+            raise PlatformError("refreeze.invalid_state", "task state cannot be refrozen", details={"state": before})
+        spec_id = metadata["spec_id"]
+        old_version = pin["acceptance_card"]["version"]
+        version = str(int(old_version) + 1)
+        spec_directory = repository / "specs" / spec_id / version
+        if spec_directory.exists():
+            raise PlatformError("refreeze.spec_exists", f"frozen spec version already exists: {spec_id}@{version}")
+        card = read_json_document(card_file, "c1.invalid_card")
+        contract = read_json_document(contract_file, "c2.invalid_contract")
+        mapping = read_json_document(mapping_file, "c1.invalid_mapping")
+        validate_three_piece(card, contract, mapping, operation_source, contract_file)
+        spec_directory.mkdir(parents=True)
+        sources = {
+            "acceptance_card": Path(card_file),
+            "contract": Path(contract_file),
+            "mapping": Path(mapping_file),
+        }
+        new_pin = {"spec_id": spec_id}
+        copied = []
+        for key, filename in SPEC_FILES.items():
+            target = spec_directory / filename
+            shutil.copyfile(sources[key], target)
+            copied.append(target.relative_to(repository))
+            new_pin[key] = {"version": version, "sha256": sha256_file(target)}
+        copy_contract_assets(contract, contract_file, spec_directory, copied)
+        baseline_records = []
+        baseline_paths = []
+        if contract.get("contract_type") == "baseline":
+            baseline_records, baseline_paths = execute_baseline_cases(repository, spec_directory, metadata, contract, new_pin)
+            copied.extend(baseline_paths)
+        now = utc_now()
+        version_document = {
+            "spec_id": spec_id,
+            "version": version,
+            "supersedes": old_version,
+            "reason": reason,
+            "refrozen_at": now,
+            "h1_actor": h1_actor,
+            "h2_actor": h2_actor,
+            "previous_contract_sha256": pin["contract"]["sha256"],
+        }
+        version_path = spec_directory / "version.json"
+        write_json(version_path, version_document)
+        copied.append(version_path.relative_to(repository))
+        events = [
+            make_event("specification.content_confirmed", task_id, h1_actor, h1_actor, before, before, payload={"spec_id": spec_id, "version": version, "supersedes": old_version, "sha256": new_pin["acceptance_card"]["sha256"]}),
+            make_event("specification.consistency_confirmed", task_id, h2_actor, h2_actor, before, before, payload={"spec_id": spec_id, "version": version, "supersedes": old_version, "contract_sha256": new_pin["contract"]["sha256"], "mapping_sha256": new_pin["mapping"]["sha256"]}),
+        ]
+        if baseline_records:
+            events.append(make_event("specification.baseline_verified", task_id, h2_actor, h2_actor, before, before, payload={"spec_id": spec_id, "version": version, "cases": baseline_records}))
+        released_lease = metadata.get("lease")
+        metadata["spec_pin"] = new_pin
+        metadata["lease"] = None
+        metadata["void_reason"] = None
+        metadata["updated_at"] = now
+        metadata["state"] = "Ready"
+        events.append(make_event("specification.refrozen", task_id, h2_actor, h2_actor, before, "Ready", payload={"spec_id": spec_id, "old_version": old_version, "version": version, "supersedes": old_version, "reason": reason, "released_lease": released_lease, "spec_pin": new_pin}))
+        if before != "Ready":
+            events.append(make_event("task.ready", task_id, h2_actor, h2_actor, before, "Ready", payload={"spec_id": spec_id, "version": version, "refrozen": True}))
+        write_task(path, metadata, body)
+        events_file = event_path(repository)
+        append_jsonl(events_file, events)
+        changed = copied + [path.relative_to(repository), events_file.relative_to(repository)]
+        commit = commit_paths(repository, changed, f"Refreeze {task_id}", push=push)
+        write_task(workspace / "task.md", metadata, body)
+        (workspace / "AGENTS.md").write_text(workspace_agents(metadata), encoding="utf-8", newline="\n")
+        for key, filename in SPEC_FILES.items():
+            shutil.copyfile(spec_directory / filename, workspace / "contract" / filename)
+        return {"task_id": task_id, "spec_id": spec_id, "old_version": old_version, "version": version, "supersedes": old_version, "spec_pin": new_pin, "state": "Ready", "commit": commit}
     finally:
         lock.unlink(missing_ok=True)

@@ -5,7 +5,7 @@ import sys
 from .errors import PlatformError
 from .lifecycle import adjudicate_task, close_task, reject_task, verify_task, void_task
 from .service import block, claim, enhancement, init_repository, init_task, status, submit, synchronize, task_log
-from .specs import freeze_task
+from .specs import freeze_task, refreeze_task
 
 
 def parser_for(role):
@@ -33,6 +33,18 @@ def parser_for(role):
         freeze.add_argument("--h1-actor", required=True)
         freeze.add_argument("--h2-actor", required=True)
         freeze.add_argument("--push", action="store_true")
+        refreeze = subparsers.add_parser("refreeze")
+        refreeze.add_argument("--repo", required=True)
+        refreeze.add_argument("--task-id", required=True)
+        refreeze.add_argument("--workspace", required=True)
+        refreeze.add_argument("--acceptance-card", required=True)
+        refreeze.add_argument("--contract", required=True)
+        refreeze.add_argument("--mapping", required=True)
+        refreeze.add_argument("--operation-source")
+        refreeze.add_argument("--h1-actor", required=True)
+        refreeze.add_argument("--h2-actor", required=True)
+        refreeze.add_argument("--reason", required=True)
+        refreeze.add_argument("--push", action="store_true")
         verify = subparsers.add_parser("verify")
         verify.add_argument("--repo", required=True)
         verify.add_argument("--task-id", required=True)
@@ -114,6 +126,8 @@ def dispatch(role, arguments):
         return init_task(arguments.repo, arguments.workspace, arguments.title, arguments.requirement, arguments.owner, arguments.actor)
     if arguments.command == "freeze":
         return freeze_task(arguments.repo, arguments.task_id, arguments.workspace, arguments.acceptance_card, arguments.contract, arguments.mapping, arguments.operation_source, arguments.h1_actor, arguments.h2_actor, arguments.push)
+    if arguments.command == "refreeze":
+        return refreeze_task(arguments.repo, arguments.task_id, arguments.workspace, arguments.acceptance_card, arguments.contract, arguments.mapping, arguments.operation_source, arguments.h1_actor, arguments.h2_actor, arguments.reason, arguments.push)
     if arguments.command == "claim":
         return claim(arguments.workspace, arguments.actor, arguments.on_behalf_of)
     if arguments.command == "submit":
