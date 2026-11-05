@@ -6,6 +6,7 @@ from .errors import PlatformError
 from .lifecycle import adjudicate_task, close_task, reject_task, verify_task, void_task
 from .service import block, claim, enhancement, init_repository, init_task, status, submit, synchronize, task_log
 from .specs import freeze_task, refreeze_task
+from .vetoes import decide_veto, list_vetoes, propose_veto, settle_expired_vetoes
 
 
 def parser_for(role):
@@ -88,6 +89,21 @@ def parser_for(role):
         sync.add_argument("--workspace", action="append", required=True)
         sync.add_argument("--actor", required=True)
         sync.add_argument("--push", action="store_true")
+        veto = subparsers.add_parser("veto")
+        veto.add_argument("--repo", required=True)
+        veto.add_argument("--actor", required=True)
+        veto.add_argument("--task-id")
+        veto.add_argument("--veto-id")
+        veto.add_argument("--acceptance-card")
+        veto.add_argument("--contract")
+        veto.add_argument("--mapping")
+        veto.add_argument("--reason")
+        veto.add_argument("--propose", action="store_true")
+        veto.add_argument("--approve", action="store_true")
+        veto.add_argument("--reject", action="store_true")
+        veto.add_argument("--withdraw", action="store_true")
+        veto.add_argument("--list", action="store_true")
+        veto.add_argument("--push", action="store_true")
     else:
         claim_parser = subparsers.add_parser("claim")
         claim_parser.add_argument("--workspace", required=True)
@@ -148,6 +164,23 @@ def dispatch(role, arguments):
         return void_task(arguments.repo, arguments.task_id, arguments.reason, arguments.actor, arguments.push)
     if arguments.command == "adjudicate":
         return adjudicate_task(arguments.repo, arguments.task_id, arguments.category, arguments.reason, arguments.actor, arguments.workspace, arguments.push)
+    if arguments.command == "veto":
+        actions = [name for name in ("propose", "approve", "reject", "withdraw", "list") if getattr(arguments, name)]
+        if len(actions) != 1:
+            raise PlatformError("veto.invalid_action", "provide exactly one of --propose --approve --reject --withdraw --list")
+        if arguments.list:
+            return {"vetoes": list_vetoes(arguments.repo)}
+        if arguments.propose:
+            if not arguments.task_id or not arguments.acceptance_card or not arguments.contract or not arguments.mapping:
+                raise PlatformError("veto.missing_arguments", "--task-id --acceptance-card --contract --mapping are required with --propose")
+            return propose_veto(arguments.repo, arguments.task_id, arguments.acceptance_card, arguments.contract, arguments.mapping, arguments.reason, arguments.actor, arguments.push)
+        if not arguments.veto_id:
+            raise PlatformError("veto.missing_arguments", "--veto-id is required")
+        if arguments.approve:
+            return decide_veto(arguments.repo, arguments.veto_id, "approve", arguments.actor, None, arguments.push)
+        if arguments.reject:
+            return decide_veto(arguments.repo, arguments.veto_id, "reject", arguments.actor, arguments.reason, arguments.push)
+        return decide_veto(arguments.repo, arguments.veto_id, "withdraw", arguments.actor, None, arguments.push)
     if arguments.command == "status":
         return status(arguments.workspace)
     if arguments.command == "log":
@@ -159,6 +192,8 @@ def main(role, argv=None):
     parser = parser_for(role)
     arguments = parser.parse_args(argv)
     try:
+        if role == "operator" and getattr(arguments, "repo", None):
+            settle_expired_vetoes(arguments.repo)
         result = dispatch(role, arguments)
         response = {"ok": True, "result": result}
         exit_code = 0
@@ -168,5 +203,5 @@ def main(role, argv=None):
     except Exception as error:
         response = {"ok": False, "error": {"code": "internal.error", "message": str(error), "details": {"type": type(error).__name__}}}
         exit_code = 4
-    print(json.dumps(response, ensure_ascii=False, sort_keys=True))
+    print(json.dumps(response, ensure_ascii=True, sort_keys=True))
     return exit_code

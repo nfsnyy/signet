@@ -4,13 +4,22 @@ from pathlib import Path
 
 from .errors import OperationalError, PlatformError
 from .gitrepo import commit_paths, ensure_repository
-from .jsonio import append_jsonl, new_id, read_json, read_jsonl, utc_now, write_json
+from .jsonio import append_jsonl, read_json, read_jsonl, utc_now
 from .runner import execute_contract_cases, frozen_contract, machine_criterion_results
-from .service import event_path, make_event, refresh_workspace, task_path
+from .service import (
+    VOIDABLE_BY_SPEC_INVALIDATION,
+    create_trace_review_task,
+    event_path,
+    invalid_marker_path,
+    make_event,
+    propagate_pin_invalidation,
+    refresh_workspace,
+    same_pin,
+    task_path,
+)
 from .specs import repository_lock
 from .taskfile import read_task, write_task
 
-VOIDABLE_BY_SPEC_INVALIDATION = {"Ready", "In Progress", "Implemented", "Verified", "Blocked"}
 CANCELABLE_STATES = {"Ready", "In Progress", "Implemented"}
 
 
@@ -257,35 +266,6 @@ def close_task(repository, task_id, decision, actor, reason=None, push=False):
         lock.unlink(missing_ok=True)
 
 
-def invalid_marker_path(repository, spec_id, version):
-    return Path(repository) / "specs" / spec_id / version / "INVALID.json"
-
-
-def same_pin(left, right):
-    return left and right and left == right
-
-
-def create_trace_review_task(repository, source_metadata, changed_tasks, events):
-    task_id = new_id("task")
-    spec_id = new_id("spec")
-    now = utc_now()
-    metadata = {
-        "task_id": task_id,
-        "title": f"追溯审查：{source_metadata['task_id']}",
-        "requirement": "specification-traceability-review",
-        "owner": source_metadata["owner"],
-        "state": "Draft",
-        "spec_id": spec_id,
-        "spec_pin": None,
-        "lease": None,
-        "created_at": now,
-        "updated_at": now,
-    }
-    body = f"# 追溯审查：{source_metadata['task_id']}\n\n原任务已完成，但其钉扎规格后来被作废。请审查交付是否需要召回、补丁或补充说明。\n"
-    changed_tasks[task_id] = (metadata, body)
-    events.append(make_event("task.initialized", task_id, "operator", source_metadata["owner"], None, "Draft", payload={"trace_review_for": source_metadata["task_id"], "spec_id": spec_id}))
-
-
 def invalidate_specification(repository, source_task_id, actor, reason, supersedes=None, push=False):
     repository = ensure_repository(repository)
     if not reason or not reason.strip():
@@ -301,20 +281,11 @@ def invalidate_specification(repository, source_task_id, actor, reason, supersed
             raise PlatformError("void.spec_not_pinned", "task has no specification to invalidate")
         spec_id = pin["spec_id"]
         version = pin["acceptance_card"]["version"]
-        marker = {
-            "spec_id": spec_id,
-            "version": version,
-            "invalidated_at": utc_now(),
-            "invalidated_by": actor,
-            "reason": reason,
-            "supersedes": supersedes,
-        }
-        marker_path = invalid_marker_path(repository, spec_id, version)
-        if marker_path.exists():
-            raise PlatformError("spec.already_invalid", "specification version is already invalidated")
-        write_json(marker_path, marker)
         changed_tasks = {}
-        events = [make_event("specification.invalidated", source_task_id, actor, actor, source_metadata["state"], source_metadata["state"], payload=marker)]
+        events = []
+        extra_paths = []
+        marker = propagate_pin_invalidation(repository, pin, actor, reason, source_task_id, changed_tasks, events, extra_paths, supersedes=supersedes)
+        events.insert(0, make_event("specification.invalidated", source_task_id, actor, actor, source_metadata["state"], source_metadata["state"], payload=marker))
         source_before = source_metadata["state"]
         source_metadata["state"] = "Void"
         source_metadata["lease"] = None
@@ -322,29 +293,6 @@ def invalidate_specification(repository, source_task_id, actor, reason, supersed
         source_metadata["updated_at"] = utc_now()
         changed_tasks[source_task_id] = (source_metadata, source_body)
         events.append(make_event("task.void", source_task_id, actor, actor, source_before, "Void", payload={"reason": "definition-defect", "spec_id": spec_id, "version": version}))
-        tasks_directory = repository / "tasks"
-        for task_file in sorted(tasks_directory.glob("*/task.md")):
-            task_id = task_file.parent.name
-            if task_id == source_task_id:
-                continue
-            if task_id in changed_tasks:
-                metadata, body = changed_tasks[task_id]
-            else:
-                metadata, body = read_task(task_file)
-            if not same_pin(metadata.get("spec_pin"), pin):
-                continue
-            if metadata.get("state") == "Done":
-                events.append(make_event("traceability.review_required", task_id, actor, metadata["owner"], "Done", "Done", payload={"source_task_id": source_task_id, "spec_id": spec_id, "version": version}))
-                create_trace_review_task(repository, metadata, changed_tasks, events)
-            elif metadata.get("state") in VOIDABLE_BY_SPEC_INVALIDATION:
-                before = metadata["state"]
-                metadata["state"] = "Void"
-                metadata["lease"] = None
-                metadata["void_reason"] = "specification-invalidated"
-                metadata["updated_at"] = utc_now()
-                changed_tasks[task_id] = (metadata, body)
-                events.append(make_event("task.void", task_id, actor, actor, before, "Void", payload={"reason": "specification-invalidated", "source_task_id": source_task_id, "spec_id": spec_id, "version": version}))
-        extra_paths = [marker_path.relative_to(repository)]
         return persist(repository, changed_tasks, events, extra_paths, f"Invalidate spec {spec_id}@{version}", push)
     finally:
         lock.unlink(missing_ok=True)

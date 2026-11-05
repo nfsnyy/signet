@@ -9,8 +9,9 @@ from .errors import OperationalError, PlatformError
 from .gitrepo import commit_paths, ensure_repository
 from .jsonio import append_jsonl, sha256_file, utc_now, write_json
 from .runner import execute_contract_cases
-from .service import SPEC_FILES, event_path, make_event, task_path, workspace_agents
+from .service import REFREEZABLE_STATES, SPEC_FILES, event_path, make_event, propagate_pin_invalidation, task_path, workspace_agents
 from .taskfile import read_task, write_task
+from .vetoes import approved_veto_for, classify_refreeze, latest_vetoes, veto_log_path
 
 VALID_STRENGTHS = {"must", "must-not", "safety-veto"}
 VALID_CONTRACT_TYPES = {"baseline", "target"}
@@ -374,9 +375,6 @@ def freeze_task(repository, task_id, workspace, card_file, contract_file, mappin
         lock.unlink(missing_ok=True)
 
 
-REFREEZABLE_STATES = {"Ready", "In Progress", "Implemented", "Blocked"}
-
-
 def refreeze_task(repository, task_id, workspace, card_file, contract_file, mapping_file, operation_source, h1_actor, h2_actor, reason, push=False):
     repository = ensure_repository(repository)
     workspace = Path(workspace).resolve()
@@ -404,6 +402,17 @@ def refreeze_task(repository, task_id, workspace, card_file, contract_file, mapp
         contract = read_json_document(contract_file, "c2.invalid_contract")
         mapping = read_json_document(mapping_file, "c1.invalid_mapping")
         validate_three_piece(card, contract, mapping, operation_source, contract_file)
+        analysis = classify_refreeze(repository, spec_id, old_version, card, contract, mapping)
+        veto = None
+        if analysis["downgrade_required"]:
+            file_hashes = {
+                "acceptance_card": sha256_file(Path(card_file)),
+                "contract": sha256_file(Path(contract_file)),
+                "mapping": sha256_file(Path(mapping_file)),
+            }
+            veto = approved_veto_for(latest_vetoes(repository), spec_id, file_hashes)
+            if veto is None:
+                raise PlatformError("refreeze.veto_required", "refreeze touches safety-veto surfaces and requires an approved veto first", details=analysis)
         spec_directory.mkdir(parents=True)
         sources = {
             "acceptance_card": Path(card_file),
@@ -452,10 +461,24 @@ def refreeze_task(repository, task_id, workspace, card_file, contract_file, mapp
         events.append(make_event("specification.refrozen", task_id, h2_actor, h2_actor, before, "Ready", payload={"spec_id": spec_id, "old_version": old_version, "version": version, "supersedes": old_version, "reason": reason, "released_lease": released_lease, "spec_pin": new_pin}))
         if before != "Ready":
             events.append(make_event("task.ready", task_id, h2_actor, h2_actor, before, "Ready", payload={"spec_id": spec_id, "version": version, "refrozen": True}))
+        extra_paths = []
+        if veto is not None:
+            other_changed = {}
+            propagate_pin_invalidation(repository, pin, h2_actor, "veto-downgrade", task_id, other_changed, events, extra_paths, supersedes=version, veto_id=veto["veto_id"])
+            for other_id, (other_metadata, other_body) in other_changed.items():
+                other_path = task_path(repository, other_id)
+                write_task(other_path, other_metadata, other_body)
+                copied.append(other_path.relative_to(repository))
+            applied = dict(veto)
+            applied["resolution"] = {"applied_at": now, "old_version": old_version, "new_version": version, "applied_by": h2_actor}
+            veto_log = veto_log_path(repository)
+            append_jsonl(veto_log, [applied])
+            extra_paths.append(veto_log.relative_to(repository))
+            events.append(make_event("veto.applied", task_id, h2_actor, h2_actor, before, "Ready", payload={"veto_id": veto["veto_id"], "old_version": old_version, "version": version}))
         write_task(path, metadata, body)
         events_file = event_path(repository)
         append_jsonl(events_file, events)
-        changed = copied + [path.relative_to(repository), events_file.relative_to(repository)]
+        changed = copied + [path.relative_to(repository), events_file.relative_to(repository)] + extra_paths
         commit = commit_paths(repository, changed, f"Refreeze {task_id}", push=push)
         write_task(workspace / "task.md", metadata, body)
         (workspace / "AGENTS.md").write_text(workspace_agents(metadata), encoding="utf-8", newline="\n")

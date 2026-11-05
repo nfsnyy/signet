@@ -17,6 +17,86 @@ SPEC_FILES = {
 
 REPORT_SECTIONS = ("implemented", "executed", "not_executed", "deviations", "collaboration_requests")
 
+REFREEZABLE_STATES = {"Ready", "In Progress", "Implemented", "Blocked"}
+
+VOIDABLE_BY_SPEC_INVALIDATION = {"Ready", "In Progress", "Implemented", "Verified", "Blocked"}
+
+
+def same_pin(left, right):
+    return left and right and left == right
+
+
+def invalid_marker_path(repository, spec_id, version):
+    return Path(repository) / "specs" / spec_id / version / "INVALID.json"
+
+
+def create_trace_review_task(repository, source_metadata, changed_tasks, events):
+    task_id = new_id("task")
+    spec_id = new_id("spec")
+    now = utc_now()
+    metadata = {
+        "task_id": task_id,
+        "title": f"追溯审查：{source_metadata['task_id']}",
+        "requirement": "specification-traceability-review",
+        "owner": source_metadata["owner"],
+        "state": "Draft",
+        "spec_id": spec_id,
+        "spec_pin": None,
+        "lease": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    body = f"# 追溯审查：{source_metadata['task_id']}\n\n原任务已完成，但其钉扎规格后来被作废。请审查交付是否需要召回、补丁或补充说明。\n"
+    changed_tasks[task_id] = (metadata, body)
+    events.append(make_event("task.initialized", task_id, "operator", source_metadata["owner"], None, "Draft", payload={"trace_review_for": source_metadata["task_id"], "spec_id": spec_id}))
+
+
+def propagate_pin_invalidation(repository, pin, actor, reason, source_task_id, changed_tasks, events, extra_paths, supersedes=None, veto_id=None):
+    spec_id = pin["spec_id"]
+    version = pin["acceptance_card"]["version"]
+    marker = {
+        "spec_id": spec_id,
+        "version": version,
+        "invalidated_at": utc_now(),
+        "invalidated_by": actor,
+        "reason": reason,
+        "supersedes": supersedes,
+    }
+    if veto_id:
+        marker["veto_id"] = veto_id
+    marker_path = invalid_marker_path(repository, spec_id, version)
+    if marker_path.exists():
+        raise PlatformError("spec.already_invalid", "specification version is already invalidated")
+    write_json(marker_path, marker)
+    extra_paths.append(marker_path.relative_to(repository))
+    tasks_directory = Path(repository) / "tasks"
+    if tasks_directory.is_dir():
+        for task_file in sorted(tasks_directory.glob("*/task.md")):
+            task_id = task_file.parent.name
+            if task_id == source_task_id:
+                continue
+            if task_id in changed_tasks:
+                metadata, body = changed_tasks[task_id]
+            else:
+                metadata, body = read_task(task_file)
+            if not same_pin(metadata.get("spec_pin"), pin):
+                continue
+            context = {"source_task_id": source_task_id, "spec_id": spec_id, "version": version}
+            if veto_id:
+                context["veto_id"] = veto_id
+            if metadata.get("state") == "Done":
+                events.append(make_event("traceability.review_required", task_id, actor, metadata["owner"], "Done", "Done", payload=context))
+                create_trace_review_task(repository, metadata, changed_tasks, events)
+            elif metadata.get("state") in VOIDABLE_BY_SPEC_INVALIDATION:
+                before = metadata["state"]
+                metadata["state"] = "Void"
+                metadata["lease"] = None
+                metadata["void_reason"] = "specification-invalidated"
+                metadata["updated_at"] = utc_now()
+                changed_tasks[task_id] = (metadata, body)
+                events.append(make_event("task.void", task_id, actor, actor, before, "Void", payload={"reason": "specification-invalidated", **context}))
+    return marker
+
 
 def event_path(repository):
     return Path(repository) / "events" / "events.jsonl"
