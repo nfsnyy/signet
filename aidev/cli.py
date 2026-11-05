@@ -36,7 +36,9 @@ def parser_for(role):
         verify = subparsers.add_parser("verify")
         verify.add_argument("--repo", required=True)
         verify.add_argument("--task-id", required=True)
-        verify.add_argument("--results", required=True)
+        verify.add_argument("--results")
+        verify.add_argument("--execute", action="store_true")
+        verify.add_argument("--manual-results")
         verify.add_argument("--verifier", required=True)
         verify.add_argument("--confirmed-by", required=True)
         verify.add_argument("--push", action="store_true")
@@ -123,7 +125,7 @@ def dispatch(role, arguments):
     if arguments.command == "sync":
         return synchronize(arguments.repo, arguments.workspace, arguments.actor, arguments.push)
     if arguments.command == "verify":
-        return verify_task(arguments.repo, arguments.task_id, arguments.results, arguments.verifier, arguments.confirmed_by, arguments.push)
+        return verify_task(arguments.repo, arguments.task_id, arguments.verifier, arguments.confirmed_by, arguments.results, arguments.execute, arguments.manual_results, arguments.push)
     if arguments.command == "reject":
         return reject_task(arguments.repo, arguments.task_id, arguments.category, arguments.reason, arguments.actor, arguments.workspace, arguments.push)
     if arguments.command == "close":

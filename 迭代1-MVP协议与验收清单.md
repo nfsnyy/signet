@@ -735,8 +735,78 @@ init-task → freeze → claim → sync → submit → sync → verify → close
 
 ### 14.4 当前明确边界
 
-- `verify` 只校验并记录外部独立初验结果，尚不在干净环境中自动执行钉扎契约用例。
+- `verify` 支持 `--execute` 在干净环境中执行钉扎契约的机器用例；外部结果模式仍保留，安全否决项仍必须人工重跑。
 - `reject` 当前只支持从 Implemented 发起。
 - `void --reason definition-defect` 尚不接受自定义重冻结归因字段。
 - 追溯审查任务只生成 Draft 任务与事件，尚未自动关联完整审计包。
 - `veto.downgrade`、协作消息自动路由和 C5 真实执行仍未实现。
+
+
+---
+
+## 15. 干净环境执行器实施状态
+
+### 15.1 契约新增要求
+
+契约引用的 dependency 和 fixture 必须登记在 `assets` 中：
+
+```json
+{
+  "assets": {
+    "fixtures/hello.txt": "SHA-256"
+  }
+}
+```
+
+每个机器用例必须声明可执行断言：
+
+```json
+{
+  "case_id": "CASE-001",
+  "command": ["python", "-c", "..."],
+  "fixtures": ["fixtures/hello.txt"],
+  "expect": {
+    "exit_code": 0,
+    "stdout_contains": "fixture-ok:hello"
+  }
+}
+```
+
+`freeze` 会校验资产存在、路径不逃逸、SHA-256 与契约一致，并把资产复制进 `specs/<spec-id>/<version>/`。验收只读取钉扎规格中的资产副本。
+
+### 15.2 verify 两种模式
+
+- `verify --results <file>`：校验并记录外部独立初验结果。
+- `verify --execute`：从钉扎契约读取机器用例，在临时目录执行。
+- 两种模式都必须由非实现者的 verifier 初验，并由不同身份的 confirm 者确认。
+- 任一标准失败都不会进入 Verified。
+
+### 15.3 当前干净环境边界
+
+- 使用临时目录作为工作目录。
+- 复制钉扎资产，不读取实现工作区的 fixtures。
+- 环境变量只保留契约 `allowed_env` 白名单。
+- 不继承 shell、PATH、代理或残留进程。
+- runner 和命令在执行前解析为绝对路径，避免依赖继承 PATH。
+- 支持可选 `environment.setup_command`，但依赖安装方式仍由契约明确声明。
+- 机器用例输出写入 `tasks/<task-id>/verification/<case-id>.log`，并随验收事件提交路径与 SHA-256。
+
+### 15.4 已验证行为
+
+- 实现工作区中同名 fixture 被污染不影响验收。
+- 成功机器用例可以完成初验、人工 confirm 并进入 Verified。
+- 输出不匹配 `expect` 时拒绝进入 Verified，任务保持 Implemented。
+- 冻结资产在验收前被篡改时，以 `verify.asset_hash_mismatch` 拒绝。
+- 缺少资产哈希、资产哈希不一致或缺少 `expect.exit_code` 时，`freeze` 拒绝。
+
+### 15.5 当前明确边界
+
+- 尚未执行网络端点活性检查。
+- 尚未实现依赖版本解析器或包管理器抽象；复杂依赖仍通过 `setup_command` 显式表达。
+- 安全否决项不能仅由机器初验自动通过，仍需人工重跑证据。
+- 人工验收标准在 `--execute` 模式下必须通过 `--manual-results` 提供。
+- C5 baseline 真实运行仍未实现。
+
+### 15.6 仓库内容策略
+
+本协议文档继续保留在仓库中，因为它与 CLI、JSON 协议和验收清单共同构成当前实现的事实说明。阶段实施日志后续可以拆分到 `docs/development-log.md`，但在形成稳定协议前不移动现有文件。

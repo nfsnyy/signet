@@ -5,6 +5,7 @@ from pathlib import Path
 from .errors import OperationalError, PlatformError
 from .gitrepo import commit_paths, ensure_repository
 from .jsonio import append_jsonl, new_id, read_json, read_jsonl, utc_now, write_json
+from .runner import execute_contract_cases, frozen_contract, machine_criterion_results
 from .service import event_path, make_event, refresh_workspace, task_path
 from .specs import repository_lock
 from .taskfile import read_task, write_task
@@ -59,8 +60,8 @@ def validate_evidence_list(value, code):
     if not isinstance(value, list) or not value:
         raise PlatformError(code, "evidence must be a non-empty list")
     for item in value:
-        if not isinstance(item, dict) or not item.get("path") or not item.get("sha256"):
-            raise PlatformError(code, "each evidence item must contain path and sha256")
+        if not isinstance(item, dict) or not item.get("sha256") or not (item.get("path") or item.get("filename")):
+            raise PlatformError(code, "each evidence item must contain sha256 and path or filename")
 
 
 def validate_verification_results(repository, metadata, document):
@@ -106,8 +107,59 @@ def validate_verification_results(repository, metadata, document):
         raise PlatformError("verify.safety_veto_manual", "safety-veto criterion cannot be manual-only")
 
 
-def verify_task(repository, task_id, results_file, verifier, confirmed_by, push=False):
+def build_executed_document(repository, metadata, verifier, manual_results_file):
+    spec_directory, _, mapping = frozen_contract(repository, metadata)
+    card = read_json(spec_directory / "acceptance-card.json")
+    safety_ids = {item.get("criterion_id") for item in card.get("criteria", []) if isinstance(item, dict) and item.get("strength") == "safety-veto"}
+    manual_rows = [row for row in mapping.get("rows", []) if isinstance(row, dict) and row.get("manual") is True]
+    manual_results = {}
+    if safety_ids or manual_rows:
+        if not manual_results_file:
+            raise PlatformError("verify.manual_results_required", "manual criteria or safety-veto rerun results are required")
+        manual_document = load_json_document(manual_results_file, "verify.invalid_manual_results")
+        if manual_document.get("verifier") != verifier:
+            raise PlatformError("verify.actor_mismatch", "manual results verifier must match the verify actor")
+        for result in manual_document.get("results", []):
+            if isinstance(result, dict) and result.get("criterion_id"):
+                manual_results[result["criterion_id"]] = result
+    case_results = execute_contract_cases(repository, metadata)
+    results = machine_criterion_results(case_results, mapping)
+    for result in results:
+        criterion_id = result["criterion_id"]
+        if criterion_id in safety_ids:
+            manual_result = manual_results.get(criterion_id)
+            if not manual_result or not isinstance(manual_result.get("manual_rerun"), dict):
+                raise PlatformError("verify.safety_rerun_required", f"safety-veto manual rerun is required: {criterion_id}")
+            result["manual_rerun"] = manual_result["manual_rerun"]
+    for row in manual_rows:
+        criterion_id = row["criterion_id"]
+        if criterion_id not in manual_results:
+            raise PlatformError("verify.manual_results_required", f"manual criterion result is required: {criterion_id}")
+        results.append(manual_results[criterion_id])
+    return {"verifier": verifier, "spec_pin": metadata["spec_pin"], "results": results}
+
+
+def materialize_machine_evidence(repository, task_id, document):
+    evidence_directory = task_path(repository, task_id).parent / "verification"
+    evidence_directory.mkdir(parents=True, exist_ok=True)
+    extra_paths = []
+    for result in document["results"]:
+        evidence = result.get("evidence", [])
+        for index, item in enumerate(evidence):
+            if not isinstance(item, dict) or "content" not in item:
+                continue
+            target = evidence_directory / item["filename"]
+            target.write_bytes(item["content"])
+            relative = target.relative_to(repository).as_posix()
+            extra_paths.append(relative)
+            evidence[index] = {"path": relative, "sha256": item["sha256"]}
+    return extra_paths
+
+
+def verify_task(repository, task_id, verifier, confirmed_by, results_file=None, execute=False, manual_results_file=None, push=False):
     repository = ensure_repository(repository)
+    if (results_file is None) == (execute is False):
+        raise PlatformError("verify.invalid_mode", "provide exactly one of results_file or execute")
     lock = lifecycle_lock(repository)
     try:
         path = task_path(repository, task_id)
@@ -116,7 +168,10 @@ def verify_task(repository, task_id, results_file, verifier, confirmed_by, push=
         metadata, body = read_task(path)
         if metadata.get("state") != "Implemented":
             raise PlatformError("verify.invalid_state", "only an Implemented task can be verified", details={"state": metadata.get("state")})
-        document = load_json_document(results_file, "verify.invalid_results")
+        if execute:
+            document = build_executed_document(repository, metadata, verifier, manual_results_file)
+        else:
+            document = load_json_document(results_file, "verify.invalid_results")
         if document.get("verifier") != verifier:
             raise PlatformError("verify.actor_mismatch", "results verifier must match the verify actor")
         validate_verification_results(repository, metadata, document)
@@ -128,14 +183,15 @@ def verify_task(repository, task_id, results_file, verifier, confirmed_by, push=
         implementer = latest_claim_actor(repository, task_id)
         if implementer and (verifier == implementer or confirmed_by == implementer):
             raise PlatformError("verify.self_review", "implementer cannot verify or confirm their own work")
+        extra_paths = materialize_machine_evidence(repository, task_id, document) if execute else []
         metadata["state"] = "Verified"
         metadata["updated_at"] = utc_now()
         events = [
-            make_event("verification.initial", task_id, verifier, verifier, "Implemented", "Implemented", payload={"results": document}),
+            make_event("verification.initial", task_id, verifier, verifier, "Implemented", "Implemented", payload={"results": document, "executed": execute}),
             make_event("verification.confirm", task_id, confirmed_by, confirmed_by, "Implemented", "Verified", payload={"confirmed_by": confirmed_by}),
             make_event("task.verified", task_id, confirmed_by, confirmed_by, "Implemented", "Verified"),
         ]
-        return persist(repository, {task_id: (metadata, body)}, events, [], f"Verify {task_id}", push)
+        return persist(repository, {task_id: (metadata, body)}, events, extra_paths, f"Verify {task_id}", push)
     finally:
         lock.unlink(missing_ok=True)
 

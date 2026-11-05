@@ -152,6 +152,23 @@ def validate_operations(contract, operation_source, source_path):
         raise PlatformError("c2.requirement_operation_mismatch", "contract operation set differs from requirement source", details={"source": str(source_path)})
 
 
+def safe_relative_path(value, code):
+    if not isinstance(value, str) or not value.strip():
+        raise PlatformError(code, "asset path must be a non-empty relative string")
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        raise PlatformError(code, f"asset path must stay inside the spec directory: {value}")
+    return path.as_posix()
+
+
+def contract_asset_paths(contract):
+    environment = contract.get("environment", {})
+    assets = list(environment.get("dependency_files", []))
+    for case in contract.get("cases", []):
+        assets.extend(case.get("fixtures", []))
+    return list(dict.fromkeys(assets))
+
+
 def validate_environment_and_cases(contract, contract_file):
     environment = contract.get("environment")
     if not isinstance(environment, dict):
@@ -160,23 +177,54 @@ def validate_environment_and_cases(contract, contract_file):
     dependency_files = environment.get("dependency_files", [])
     endpoints = environment.get("endpoints", {})
     allowed_env = environment.get("allowed_env", [])
-    if not isinstance(dependency_files, list) or any(not isinstance(item, str) for item in dependency_files):
-        raise PlatformError("c3.invalid_environment", "dependency_files must be a list of strings")
+    setup_command = environment.get("setup_command")
+    if not isinstance(dependency_files, list):
+        raise PlatformError("c3.invalid_environment", "dependency_files must be a list")
     if not isinstance(endpoints, dict) or any(not isinstance(key, str) or not isinstance(value, str) or not value for key, value in endpoints.items()):
         raise PlatformError("c3.invalid_environment", "endpoints must map names to non-empty addresses")
     if not isinstance(allowed_env, list) or any(not isinstance(item, str) for item in allowed_env):
         raise PlatformError("c3.invalid_environment", "allowed_env must be a list of strings")
+    if setup_command is not None and (not isinstance(setup_command, list) or not setup_command or any(not isinstance(part, str) or not part for part in setup_command)):
+        raise PlatformError("c3.invalid_environment", "setup_command must be null or a non-empty string list")
+    asset_hashes = contract.get("assets", {})
+    if not isinstance(asset_hashes, dict) or any(not isinstance(key, str) or not isinstance(value, str) or len(value) != 64 for key, value in asset_hashes.items()):
+        raise PlatformError("c3.invalid_assets", "assets must map relative paths to SHA-256 strings")
     contract_directory = Path(contract_file).resolve().parent
     for dependency in dependency_files:
+        safe_relative_path(dependency, "c3.invalid_dependency")
         if not (contract_directory / dependency).is_file():
             raise PlatformError("c3.missing_dependency", f"dependency file does not exist: {dependency}")
     for case in required_list(contract, "cases", "c3.invalid_contract"):
         command = case.get("command")
         if not isinstance(command, list) or not command or any(not isinstance(part, str) or not part for part in command):
             raise PlatformError("c3.invalid_case", f"case command must be a non-empty string list: {case.get('case_id')}")
+        expectation = case.get("expect")
+        if not isinstance(expectation, dict) or not isinstance(expectation.get("exit_code"), int):
+            raise PlatformError("c3.invalid_expectation", f"case expect.exit_code must be an integer: {case.get('case_id')}")
+        if "stdout_contains" in expectation and not isinstance(expectation["stdout_contains"], str):
+            raise PlatformError("c3.invalid_expectation", f"stdout_contains must be a string: {case.get('case_id')}")
         for fixture in case.get("fixtures", []):
-            if not isinstance(fixture, str) or not (contract_directory / fixture).is_file():
+            safe_relative_path(fixture, "c3.invalid_fixture")
+            if not (contract_directory / fixture).is_file():
                 raise PlatformError("c3.missing_fixture", f"fixture does not exist for {case.get('case_id')}: {fixture}")
+    for asset in contract_asset_paths(contract):
+        expected = asset_hashes.get(asset)
+        if not expected:
+            raise PlatformError("c3.asset_hash_missing", f"asset is missing a frozen SHA-256: {asset}")
+        if sha256_file(contract_directory / asset) != expected:
+            raise PlatformError("c3.asset_hash_mismatch", f"asset hash does not match contract: {asset}")
+
+
+def copy_contract_assets(contract, contract_file, spec_directory, copied):
+    source_directory = Path(contract_file).resolve().parent
+    for asset in contract_asset_paths(contract):
+        source = source_directory / asset
+        target = (Path(spec_directory) / asset).resolve()
+        if Path(spec_directory).resolve() not in target.parents and target != Path(spec_directory).resolve():
+            raise PlatformError("c3.invalid_asset_path", f"asset escapes the spec directory: {asset}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        copied.append(target.relative_to(spec_directory.parents[2]))
 
 
 def validate_three_piece(card, contract, mapping, operation_source, contract_file):
@@ -223,6 +271,7 @@ def freeze_task(repository, task_id, workspace, card_file, contract_file, mappin
             shutil.copyfile(sources[key], target)
             copied.append(target.relative_to(repository))
             pin[key] = {"version": version, "sha256": sha256_file(target)}
+        copy_contract_assets(contract, contract_file, spec_directory, copied)
         now = utc_now()
         events = [
             make_event("specification.content_confirmed", task_id, h1_actor, h1_actor, "Draft", "Draft", payload={"spec_id": spec_id, "version": version, "sha256": pin["acceptance_card"]["sha256"]}),
