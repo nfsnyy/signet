@@ -6,7 +6,7 @@ from pathlib import Path
 from .errors import OperationalError, PlatformError
 from .gitrepo import commit_paths, ensure_repository
 from .jsonio import append_jsonl, new_id, read_jsonl, sha256_file, utc_now
-from .service import REFREEZABLE_STATES, event_path, make_event, parse_time, task_path
+from .service import REFREEZABLE_STATES, event_path, make_event, parse_time, stamp_events, task_path
 from .taskfile import read_task
 
 SAFETY_STRENGTH = "safety-veto"
@@ -200,7 +200,7 @@ def propose_veto(repository, task_id, card_file, contract_file, mapping_file, re
         append_jsonl(log_path, [veto])
         event = make_event("veto.proposed", task_id, actor, actor, metadata["state"], metadata["state"], payload={"veto_id": veto["veto_id"], "spec_id": spec_id, "analysis": analysis, "delay_until": veto["delay_until"]})
         events_file = event_path(repository)
-        append_jsonl(events_file, [event])
+        append_jsonl(events_file, stamp_events(repository, [event]))
         commit = commit_paths(repository, [log_path.relative_to(repository), events_file.relative_to(repository)], f"Propose veto for {task_id}", push=push)
         veto["commit"] = commit
         return veto
@@ -248,7 +248,7 @@ def decide_veto(repository, veto_id, action, actor, reason=None, push=False):
         append_jsonl(log_path, [update])
         event = make_event(f"veto.{action}d", veto.get("task_id"), actor, veto.get("proposed_by"), "proposed", update["status"], payload={"veto_id": veto_id, "reason": reason or veto.get("reason")})
         events_file = event_path(repository)
-        append_jsonl(events_file, [event])
+        append_jsonl(events_file, stamp_events(repository, [event]))
         commit = commit_paths(repository, [log_path.relative_to(repository), events_file.relative_to(repository)], f"{action.capitalize()} veto {veto_id}", push=push)
         update["commit"] = commit
         return update
@@ -284,7 +284,7 @@ def settle_expired_vetoes(repository, push=False):
         log_path = veto_log_path(repository)
         append_jsonl(log_path, updates)
         events_file = event_path(repository)
-        append_jsonl(events_file, events)
+        append_jsonl(events_file, stamp_events(repository, events))
         commit = commit_paths(repository, [log_path.relative_to(repository), events_file.relative_to(repository)], f"Settle {len(updates)} expired veto(s)", push=push)
         return {"settled": len(updates), "commit": commit}
     finally:

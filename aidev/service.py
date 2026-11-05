@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -132,14 +133,51 @@ def make_event(event_type, task_id, actor, on_behalf_of, before, after, proposal
     }
 
 
-def init_repository(repository, actor):
+ACTOR_PATTERN = re.compile(r"^[a-z0-9][a-z0-9\-*]{0,63}$")
+
+
+def validate_actor_alias(actor):
+    if not isinstance(actor, str) or not ACTOR_PATTERN.fullmatch(actor):
+        raise PlatformError("actor.invalid_alias", "actor must be a lowercase alias such as nfsnyy, agent-a, or verifier-*", details={"actor": actor})
+
+
+def project_metadata(repository):
+    path = Path(repository) / "project.json"
+    if not path.is_file():
+        return None
+    try:
+        data = read_json(path)
+    except (OSError, json.JSONDecodeError):
+        return None
+    project_id = data.get("project_id")
+    return project_id if isinstance(project_id, str) and project_id else None
+
+
+def stamp_events(repository, events):
+    project_id = project_metadata(repository)
+    if not project_id:
+        return events
+    for event in events:
+        event.setdefault("project_id", project_id)
+    return events
+
+
+def init_repository(repository, actor, name=None, owner=None):
     repository = initialize_repository(repository)
+    project = {
+        "project_id": new_id("project"),
+        "name": name or Path(repository).resolve().name,
+        "owner": owner or actor,
+        "created_at": utc_now(),
+    }
+    write_json(Path(repository) / "project.json", project)
     events = event_path(repository)
     events.parent.mkdir(parents=True, exist_ok=True)
     events.touch()
-    append_jsonl(events, [make_event("repository.initialized", None, actor, actor, None, None)])
-    commit = commit_paths(repository, ["events/events.jsonl"], "Initialize AI development platform")
-    return {"repository": str(repository), "commit": commit}
+    initialized = stamp_events(repository, [make_event("repository.initialized", None, actor, actor, None, None, payload={"project": project})])
+    append_jsonl(events, initialized)
+    commit = commit_paths(repository, ["project.json", "events/events.jsonl"], "Initialize AI development platform")
+    return {"repository": str(repository), "project": project, "commit": commit}
 
 
 def workspace_agents(metadata):
@@ -182,7 +220,7 @@ def init_task(repository, workspace, title, requirement, owner, actor):
     authoritative_task = task_path(repository, task_id)
     write_task(authoritative_task, metadata, body)
     event = make_event("task.initialized", task_id, actor, actor, None, "Draft", payload={"spec_id": spec_id})
-    append_jsonl(event_path(repository), [event])
+    append_jsonl(event_path(repository), stamp_events(repository, [event]))
     commit = commit_paths(
         repository,
         [authoritative_task.relative_to(repository), event_path(repository).relative_to(repository)],
@@ -678,7 +716,7 @@ def synchronize(repository, workspaces, actor, push=False):
             write_task(path, metadata, body)
             paths.append(path.relative_to(repository))
         if new_events:
-            append_jsonl(events_file, new_events)
+            append_jsonl(events_file, stamp_events(repository, new_events))
             paths.append(events_file.relative_to(repository))
         paths.extend(collab_paths)
         commit = commit_paths(repository, paths, f"Sync {len(proposals)} proposal(s)", push=push) if paths else None

@@ -9,7 +9,7 @@ from .errors import OperationalError, PlatformError
 from .gitrepo import commit_paths, ensure_repository
 from .jsonio import append_jsonl, sha256_file, utc_now, write_json
 from .runner import execute_contract_cases
-from .service import REFREEZABLE_STATES, SPEC_FILES, event_path, make_event, propagate_pin_invalidation, task_path, workspace_agents
+from .service import REFREEZABLE_STATES, SPEC_FILES, event_path, make_event, propagate_pin_invalidation, stamp_events, task_path, workspace_agents
 from .taskfile import read_task, write_task
 from .vetoes import approved_veto_for, classify_refreeze, latest_vetoes, veto_log_path
 
@@ -363,7 +363,7 @@ def freeze_task(repository, task_id, workspace, card_file, contract_file, mappin
         ])
         write_task(path, metadata, body)
         events_file = event_path(repository)
-        append_jsonl(events_file, events)
+        append_jsonl(events_file, stamp_events(repository, events))
         changed = copied + [path.relative_to(repository), events_file.relative_to(repository)]
         commit = commit_paths(repository, changed, f"Freeze {task_id}", push=push)
         write_task(workspace / "task.md", metadata, body)
@@ -477,7 +477,7 @@ def refreeze_task(repository, task_id, workspace, card_file, contract_file, mapp
             events.append(make_event("veto.applied", task_id, h2_actor, h2_actor, before, "Ready", payload={"veto_id": veto["veto_id"], "old_version": old_version, "version": version}))
         write_task(path, metadata, body)
         events_file = event_path(repository)
-        append_jsonl(events_file, events)
+        append_jsonl(events_file, stamp_events(repository, events))
         changed = copied + [path.relative_to(repository), events_file.relative_to(repository)] + extra_paths
         commit = commit_paths(repository, changed, f"Refreeze {task_id}", push=push)
         write_task(workspace / "task.md", metadata, body)

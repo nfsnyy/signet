@@ -5,7 +5,7 @@ import sys
 from .collaboration import collab_answer, collab_send, collaboration_overview
 from .errors import PlatformError
 from .lifecycle import adjudicate_task, close_task, reject_task, verify_task, void_task
-from .service import block, claim, enhancement, init_repository, init_task, status, submit, synchronize, task_log
+from .service import block, claim, enhancement, init_repository, init_task, status, submit, synchronize, task_log, validate_actor_alias
 from .specs import freeze_task, refreeze_task
 from .vetoes import decide_veto, list_vetoes, propose_veto, settle_expired_vetoes
 
@@ -17,6 +17,8 @@ def parser_for(role):
         repository = subparsers.add_parser("init-repository")
         repository.add_argument("--repo", required=True)
         repository.add_argument("--actor", required=True)
+        repository.add_argument("--name")
+        repository.add_argument("--owner")
         task = subparsers.add_parser("init-task")
         task.add_argument("--repo", required=True)
         task.add_argument("--workspace", required=True)
@@ -156,7 +158,7 @@ def parser_for(role):
 
 def dispatch(role, arguments):
     if arguments.command == "init-repository":
-        return init_repository(arguments.repo, arguments.actor)
+        return init_repository(arguments.repo, arguments.actor, arguments.name, arguments.owner)
     if arguments.command == "init-task":
         return init_task(arguments.repo, arguments.workspace, arguments.title, arguments.requirement, arguments.owner, arguments.actor)
     if arguments.command == "freeze":
@@ -217,6 +219,10 @@ def main(role, argv=None):
     parser = parser_for(role)
     arguments = parser.parse_args(argv)
     try:
+        for attribute in ("actor", "on_behalf_of", "h1_actor", "h2_actor", "verifier", "confirmed_by"):
+            value = getattr(arguments, attribute, None)
+            if value is not None:
+                validate_actor_alias(value)
         if role == "operator" and getattr(arguments, "repo", None):
             settle_expired_vetoes(arguments.repo)
         result = dispatch(role, arguments)

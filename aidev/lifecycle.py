@@ -15,6 +15,7 @@ from .service import (
     propagate_pin_invalidation,
     refresh_workspace,
     same_pin,
+    stamp_events,
     task_path,
 )
 from .specs import repository_lock
@@ -40,7 +41,7 @@ def persist(repository, changed_tasks, events, extra_paths, message, push):
         write_task(path, metadata, body)
         paths.append(path.relative_to(repository))
     events_file = event_path(repository)
-    append_jsonl(events_file, events)
+    append_jsonl(events_file, stamp_events(repository, events))
     paths.append(events_file.relative_to(repository))
     paths.extend(extra_paths)
     commit = commit_paths(repository, paths, message, push=push)
