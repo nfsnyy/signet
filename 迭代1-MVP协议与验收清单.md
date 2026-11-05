@@ -651,3 +651,20 @@ init-task → freeze → claim → sync → submit → sync → verify → close
 - 尚未实现 `verify`、`reject`、`close`、`void`、`adjudicate`、block 和 enhancement。
 - 尚未实现验收用例自动执行；当前 `Implemented` 只证明 agent 按格式提交且证据非空，不证明结果正确。
 - 尚未实现远端冲突时的重新验证与恢复流程。
+
+
+### 13.5 远端同步状态
+
+- 远端：`https://github.com/nfsnyy/signet.git`
+- 本地分支：`main`
+- 已推送提交：`ea4a246c8a8d67970df7a3c9eaf89558dbeca37d`
+- 推送后已核对：本地 `HEAD` 与远端 `refs/heads/main` 一致。
+- PAT 没有写入仓库、代码、Git 配置或本文档；聊天中出现过的 PAT 应视为已泄露并继续执行撤销/轮换纪律。
+
+### 13.6 当前 review 结论
+
+- 阶段 A 的权威仓库边界、选择性提交、并发领取和幂等 sync 已经过真实本地验证。
+- 阶段 B 的 `freeze → claim → sync → submit → sync` 已经过真实本地验证。
+- C1/C2/C3 与报告/证据闸门已经能拒绝对应缺陷输入。
+- 当前结果只支持进入下一阶段开发，不支持开始 dogfood。
+- 下一优先级是实现 `verify / reject / close / void / adjudicate`，随后补齐 C5、干净验收环境和规格修订，而不是先做页面或服务端。
