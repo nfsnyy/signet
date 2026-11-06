@@ -14,6 +14,8 @@ SPEC_FILES = {
 
 REPORT_SECTIONS = ("implemented", "executed", "not_executed", "deviations", "collaboration_requests")
 
+WORKSPACE_DIRECTORIES = ("contract", "evidence", "inbox", "outbox", "outbox-collab")
+
 REFREEZABLE_STATES = {"Ready", "In Progress", "Implemented", "Blocked"}
 
 VOIDABLE_BY_SPEC_INVALIDATION = {"Ready", "In Progress", "Implemented", "Verified", "Blocked"}

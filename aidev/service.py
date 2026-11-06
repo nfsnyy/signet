@@ -7,6 +7,7 @@ from .collaboration import process_collaboration_sync, validate_report_collabora
 from .domain import (
     SPEC_FILES,
     VOIDABLE_BY_SPEC_INVALIDATION,
+    WORKSPACE_DIRECTORIES,
     apply_block,
     apply_claim,
     apply_enhancement,
@@ -169,7 +170,7 @@ def init_task(repository, workspace, title, requirement, owner, actor):
         f"Initialize {task_id}",
     )
     workspace.mkdir(parents=True, exist_ok=True)
-    for directory in ["contract", "evidence", "inbox", "outbox", "outbox-collab"]:
+    for directory in WORKSPACE_DIRECTORIES:
         (workspace / directory).mkdir(exist_ok=True)
     write_task(workspace / "task.md", metadata, body)
     (workspace / "AGENTS.md").write_text(workspace_agents(metadata), encoding="utf-8", newline="\n")
