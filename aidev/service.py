@@ -121,6 +121,8 @@ def stamp_events(repository, events):
 
 def init_repository(repository, actor, name=None, owner=None):
     repository = initialize_repository(repository)
+    if (Path(repository) / "project.json").is_file():
+        raise PlatformError("repository.already_initialized", "state repository is already initialized")
     project = {
         "project_id": new_id("project"),
         "name": name or Path(repository).resolve().name,

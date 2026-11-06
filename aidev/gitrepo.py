@@ -37,6 +37,8 @@ def ensure_repository(repository):
 def initialize_repository(repository):
     repository = Path(repository).resolve()
     repository.mkdir(parents=True, exist_ok=True)
+    if (repository / ".git").exists():
+        return repository
     if any(repository.iterdir()):
         raise OperationalError("git.repository_not_empty", f"directory is not empty: {repository}")
     run_git(repository, ["init", "-b", "main"])
