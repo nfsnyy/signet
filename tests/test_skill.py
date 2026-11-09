@@ -1,21 +1,37 @@
-import argparse
 import re
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
 from aidev import collaboration, domain
-from aidev.cli import parser_for
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL_PATH = ROOT / "skills" / "aidev-agent" / "SKILL.md"
+_VERB_CACHE = {}
 
 
 def cli_verbs(role):
-    parser = parser_for(role)
-    for action in parser._actions:
-        if isinstance(action, argparse._SubParsersAction):
-            return set(action.choices.keys())
-    raise AssertionError(f"no subparsers found for role {role}")
+    if role in _VERB_CACHE:
+        return _VERB_CACHE[role]
+    script = ROOT / f"aidev-{role}.py"
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"{script.name} --help exited {result.returncode}: {(result.stderr or '')[-200:]}")
+    groups = re.findall(r"\{([^{}]+)\}", result.stdout)
+    if not groups:
+        raise AssertionError(f"no subcommand choices found in {script.name} --help output")
+    group = max(groups, key=lambda item: len(item.split(",")))
+    _VERB_CACHE[role] = {item.strip() for item in group.split(",") if item.strip()}
+    return _VERB_CACHE[role]
 
 
 def parse_frontmatter(text):

@@ -38,6 +38,7 @@ whenToUse: 当任务位于 aidev 工作区（目录里含 task.md、AGENTS.md、
 | `enhancement` | 登记后续改进想法（不改变当前范围） | `--actor`、`--on-behalf-of`、`--title`、`--details` | 任务 In Progress 且你持有租约 |
 | `collab-send` | 向另一个任务发协作消息 | `--type`、`--to-task`、`--summary`、`--details` | 见第 4 节 |
 | `collab-answer` | 应答发给你任务的协作消息 | `--message-id`、`--action`、`--note` | 消息在 inbox/ 且轮到你 |
+| `health` | 检查平台服务连通性（只读探针） | 无 | 无 |
 
 operator 面动词（`init-repository/init-task/freeze/refreeze/sync/verify/reject/close/void/adjudicate/veto/inbox`）**不是你用的**，不要尝试调用。
 

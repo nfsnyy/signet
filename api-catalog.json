@@ -1,0 +1,28 @@
+{
+  "catalog_id": "signet-api-catalog",
+  "version": "1",
+  "note": "平台全动词 API 操作目录（v0.8 §7）。本目录为需求侧事实源：三锚一致性用例在 verify 时把它与 /openapi.json、实际端点做集合比对。路径与参数语义必须与迭代 1 CLI 动词一致。",
+  "operations": [
+    {"verb": "status", "audience": "agent", "method": "GET", "path": "/api/tasks/{task_id}/status", "request": "路径参数 task_id；Header 携带凭据", "response": "任务状态、spec_pin、冻结清单、inbox、租约"},
+    {"verb": "log", "audience": "both", "method": "GET", "path": "/api/tasks/{task_id}/events", "request": "路径参数 task_id", "response": "按时间序的事件链 JSON"},
+    {"verb": "claim", "audience": "agent", "method": "POST", "path": "/api/tasks/{task_id}/claims", "request": "{actor, on_behalf_of}", "response": "proposal 受理结果（幂等：同 actor 接管+续期，含 lease.renewed 语义）"},
+    {"verb": "submit", "audience": "agent", "method": "POST", "path": "/api/tasks/{task_id}/submission", "request": "multipart：四段式报告 JSON + 证据文件", "response": "proposal 受理结果"},
+    {"verb": "block", "audience": "agent", "method": "POST", "path": "/api/tasks/{task_id}/blocks", "request": "{actor, on_behalf_of, reason, evidence[]}", "response": "proposal 受理结果"},
+    {"verb": "enhancement", "audience": "agent", "method": "POST", "path": "/api/tasks/{task_id}/enhancements", "request": "{actor, on_behalf_of, title, details}", "response": "proposal 受理结果"},
+    {"verb": "collab_send", "audience": "agent", "method": "POST", "path": "/api/tasks/{task_id}/collaborations", "request": "{actor, on_behalf_of, message_type, target_task, body}", "response": "消息登记结果"},
+    {"verb": "collab_answer", "audience": "agent", "method": "POST", "path": "/api/collaborations/{message_id}/answers", "request": "{actor, on_behalf_of, action(accept|reject|counter), body}", "response": "答复登记结果"},
+    {"verb": "init_repository", "audience": "operator", "method": "POST", "path": "/api/repositories", "request": "{repo, actor, name, owner}", "response": "project.json + 首提交信息"},
+    {"verb": "init_task", "audience": "operator", "method": "POST", "path": "/api/tasks", "request": "{workspace, title, requirement, owner, actor}", "response": "task_id + spec_id（Draft）"},
+    {"verb": "freeze", "audience": "operator", "method": "POST", "path": "/api/tasks/{task_id}/freeze", "request": "三件套文件 + {h1_actor, h2_actor, push}", "response": "pin + Ready"},
+    {"verb": "refreeze", "audience": "operator", "method": "POST", "path": "/api/tasks/{task_id}/refreeze", "request": "三件套文件 + {h1_actor, h2_actor, reason}", "response": "新版本 pin + supersedes"},
+    {"verb": "sync", "audience": "operator", "method": "POST", "path": "/api/sync", "request": "{workspace[], actor, push}", "response": "提案处理结果 + 工作区刷新"},
+    {"verb": "verify", "audience": "operator", "method": "POST", "path": "/api/tasks/{task_id}/verify", "request": "--results 文件 或 --execute（机器用例）+ {manual_results, actor}", "response": "逐条验收记录（初验/confirm 分开落事件）"},
+    {"verb": "reject", "audience": "operator", "method": "POST", "path": "/api/tasks/{task_id}/reject", "request": "{actor, category(implementation|input), reason, evidence}", "response": "状态回 Ready 或 Void"},
+    {"verb": "close", "audience": "operator", "method": "POST", "path": "/api/tasks/{task_id}/close", "request": "{actor, decision(accept|reject), reason?}", "response": "Done 或拒收记录"},
+    {"verb": "void", "audience": "operator", "method": "POST", "path": "/api/tasks/{task_id}/void", "request": "{actor, reason}", "response": "Void + 原因落事件"},
+    {"verb": "adjudicate", "audience": "operator", "method": "POST", "path": "/api/tasks/{task_id}/adjudication", "request": "{actor, verdict, reason}", "response": "回 Ready 或 Void 传播"},
+    {"verb": "veto", "audience": "operator", "method": "POST", "path": "/api/vetoes", "request": "{actor, spec_id, target, rationale, substitute_control}", "response": "veto 状态机记录"},
+    {"verb": "inbox", "audience": "operator", "method": "GET", "path": "/api/inbox", "request": "查询参数 task_id 可选", "response": "协作消息待办列表"},
+    {"verb": "health", "audience": "both", "method": "GET", "path": "/api/health", "request": "无参数", "response": "{\"status\": \"ok\"} 服务存活探针"}
+  ]
+}

@@ -1,9 +1,12 @@
+import atexit
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -22,6 +25,46 @@ TEST_ENV.update({
     "GIT_COMMITTER_EMAIL": "12371954+nfsnyy@users.noreply.github.com",
 })
 
+# 服务端（同进程线程内）也会直接发起 git 提交，需要稳定的提交身份。
+for name, value in (
+    ("GIT_AUTHOR_NAME", "nfsnyy"),
+    ("GIT_AUTHOR_EMAIL", "12371954+nfsnyy@users.noreply.github.com"),
+    ("GIT_COMMITTER_NAME", "nfsnyy"),
+    ("GIT_COMMITTER_EMAIL", "12371954+nfsnyy@users.noreply.github.com"),
+):
+    os.environ.setdefault(name, value)
+
+_SERVER = None
+_BASE_URL = None
+
+
+def start_service():
+    global _SERVER, _BASE_URL
+    if _BASE_URL is not None:
+        return _BASE_URL
+    import uvicorn
+
+    from aidev.web.app import create_app
+
+    config = uvicorn.Config(create_app(), host="127.0.0.1", port=0, log_level="warning")
+    _SERVER = uvicorn.Server(config)
+    thread = threading.Thread(target=_SERVER.run, daemon=True, name="aidev-test-service")
+    thread.start()
+    deadline = time.time() + 15
+    while not _SERVER.started:
+        if time.time() > deadline:
+            raise RuntimeError("test service failed to start within 15s")
+        time.sleep(0.02)
+    port = _SERVER.servers[0].sockets[0].getsockname()[1]
+    _BASE_URL = f"http://127.0.0.1:{port}"
+    atexit.register(_stop_service)
+    return _BASE_URL
+
+
+def _stop_service():
+    if _SERVER is not None:
+        _SERVER.should_exit = True
+
 
 class WorkflowTestCase(unittest.TestCase):
     def setUp(self):
@@ -35,10 +78,12 @@ class WorkflowTestCase(unittest.TestCase):
         return self.root.joinpath(*parts)
 
     def run_json(self, script, arguments, expected_exit=0):
+        env = dict(TEST_ENV)
+        env["SIGNET_BASE_URL"] = start_service()
         result = subprocess.run(
             [sys.executable, str(script), *map(str, arguments)],
             cwd=ROOT,
-            env=TEST_ENV,
+            env=env,
             capture_output=True,
             text=True,
             encoding="utf-8",
