@@ -8,7 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, model_validator
 
-from .. import authn
+from .. import authn, readmodel
 from ..collaboration import collab_answer, collab_send, collaboration_overview
 from ..domain import lease_is_active, task_path, validate_actor_alias
 from ..errors import PlatformError
@@ -27,6 +27,7 @@ from ..service import (
     synchronize,
     task_log,
 )
+from . import pages
 from ..specs import freeze_task, refreeze_task
 from ..taskfile import read_task
 from ..vetoes import decide_veto, list_vetoes, propose_veto, settle_expired_vetoes
@@ -316,6 +317,10 @@ def create_app(default_repo=None):
     def request_actor(request):
         return credentials(request)["actor"]
 
+    def page_session(request):
+        token = request.cookies.get(authn.SESSION_COOKIE)
+        return authn.find_session(token) if token else None
+
     @app.exception_handler(PlatformError)
     async def handle_platform_error(request, exc):
         if exc.exit_code == 3:
@@ -347,6 +352,13 @@ def create_app(default_repo=None):
         if path.startswith("/api/") and path not in PUBLIC_PATHS:
             context = authenticate_header(request.headers.get("Authorization"))
             if context is None:
+                # 页面会话 cookie 同样是有效凭据：读端点要支持浏览器直接访问
+                # （AC-01：带有效会话 cookie 返回 200 JSON）。
+                cookie_token = request.cookies.get(authn.SESSION_COOKIE)
+                cookie_session = authn.find_session(cookie_token) if cookie_token else None
+                if cookie_session:
+                    context = {"kind": "user", "actor": cookie_session["user"], "task": None}
+            if context is None:
                 return JSONResponse(
                     status_code=401,
                     content=error_payload("auth.required", "valid credentials are required for this endpoint"),
@@ -376,21 +388,46 @@ def create_app(default_repo=None):
         response.set_cookie(authn.SESSION_COOKIE, token, httponly=True, samesite="lax", path="/")
         return ok({"token": token, "user": body.user})
 
+    @app.get("/api/project")
+    def project_endpoint(request: Request):
+        return ok(readmodel.project_snapshot(resolve_repo(None)))
+
+    @app.get("/api/requirements")
+    def requirements_endpoint(request: Request):
+        return ok({"requirements": readmodel.list_requirements(resolve_repo(None))})
+
+    @app.get("/api/requirements/{requirement_id}")
+    def requirement_detail_endpoint(request: Request, requirement_id: str):
+        detail = readmodel.requirement_detail(resolve_repo(None), requirement_id)
+        if detail is None:
+            raise PlatformError("requirement.not_found", f"requirement does not exist: {requirement_id}")
+        return ok(detail)
+
     @app.get("/")
     def overview(request: Request):
-        token = request.cookies.get(authn.SESSION_COOKIE)
-        session = authn.find_session(token) if token else None
+        session = page_session(request)
         if session is None:
             return RedirectResponse(url="/login", status_code=302)
-        user = session["user"]
-        page = (
-            "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
-            "<title>signet 概况</title></head><body>"
-            "<h1>signet 平台</h1>"
-            f"<p>当前登录用户：<strong>{user}</strong></p>"
-            "</body></html>"
-        )
-        return HTMLResponse(page)
+        snapshot = readmodel.project_snapshot(resolve_repo(None))
+        return HTMLResponse(pages.render_overview(session["user"], snapshot))
+
+    @app.get("/requirements")
+    def requirements_page(request: Request):
+        session = page_session(request)
+        if session is None:
+            return RedirectResponse(url="/login", status_code=302)
+        entries = readmodel.list_requirements(resolve_repo(None))
+        return HTMLResponse(pages.render_requirements(session["user"], entries))
+
+    @app.get("/requirements/{requirement_id}")
+    def requirement_detail_page(request: Request, requirement_id: str):
+        session = page_session(request)
+        if session is None:
+            return RedirectResponse(url="/login", status_code=302)
+        detail = readmodel.requirement_detail(resolve_repo(None), requirement_id)
+        if detail is None:
+            raise PlatformError("requirement.not_found", f"requirement does not exist: {requirement_id}")
+        return HTMLResponse(pages.render_requirement_detail(session["user"], detail))
 
     @app.get("/login")
     def login_page(request: Request):

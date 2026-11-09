@@ -21,16 +21,24 @@ python -m aidev.web.server --host 127.0.0.1 --port 8000
 - 服务用 `SIGNET_STATE_REPO` 环境变量（或等价的 `--repo` 启动参数）绑定权威状态仓：请求带**可用的**显式 `repo` 时尊重请求（operator 动词 `--repo` 须被尊重），否则落到绑定仓；都不可用时报错 `git.not_repository`。编排写入（init-task/freeze/claim 等）因此总是落在绑定仓上。
 - `SIGNET_PLATFORM_REPO` 与绑定无关：它仅供 runner/CLI 定位**被测代码**（平台仓工作副本），服务端不读取它作为状态仓；验收形态即 `SIGNET_STATE_REPO=<状态仓克隆>` + `SIGNET_PLATFORM_REPO=<平台仓>` 双变量并存。
 - 存活探针：`GET /api/health` 返回 `{"status": "ok"}`，公开无鉴权。
-- 除 `/api/health` 与 `POST /api/login` 外，全部 `/api/*` 端点一律要求凭据：无凭据/坏凭据返回 401 JSON，不进入应用层。
+- 除 `/api/health` 与 `POST /api/login` 外，全部 `/api/*` 端点一律要求凭据：无凭据/坏凭据返回 401 JSON，不进入应用层。凭据可以是 `Authorization: Bearer` 令牌，也可以是有效会话 cookie（浏览器直接访问读端点）。
 - 全部 API 响应统一为信封：`{"ok": true, "result": ...}` 或 `{"ok": false, "error": {"code", "message", "details"}}`。
 - 全动词端点见仓库根 `api-catalog.json`；服务同时提供 `/openapi.json`。
+
+## project 与需求只读面（T3）
+
+- `GET /api/project`：概况 JSON，含状态仓标识 `repo`、任务状态计数 `task_counts`（各状态之和恒等于 `tasks/` 目录数）、待验收置顶列表 `pending_verification`（状态为 Implemented 的任务）、事件时间线 `recent_events`（新的在前）与当前 `commit` 标识（git HEAD）。服务端写动词提交后重读即时反映。
+- `GET /api/requirements`：需求录列表，每条含 `requirement_id`/`title`/`status`/`priority`/`owner`/`progress`/`task_count`；`progress = Done 数 /（反查任务总数 - Void 数）`，分母为 0 时取 0。
+- `GET /api/requirements/{requirement_id}`：需求详情，`body` 为仓内 `requirement.md` 去掉首个 YAML frontmatter 块后的原稿（逐字节一致，v1 不做 markdown 渲染）；`tasks` 为反查任务集合；`progress` 口径同上。
+- 页面三件套（未登录一律 302 到 `/login`）：`GET /` 概况（任务计数、待验收、最近事件）、`GET /requirements` 需求列表、`GET /requirements/{requirement_id}` 详情（正文以转义原稿展示）。
+- 读模型以状态仓为唯一事实源直读，见 `aidev/readmodel.py`；页面渲染见 `aidev/web/pages.py`。
 
 ## 登录与凭据
 
 - **账号**：服务端数据目录 `~/.signet/`（不进 git）持有 `users.json`（PBKDF2 口令散列）、`server-secret`（HMAC 密钥，0600，惰性生成）与 `service-audit.jsonl`（管理审计，追加写）。服务每次登录实时读取 `users.json`，新建账号下一次登录即认可，无需重启。
 - **管理入口**：仓根第三个 CLI `aidev-admin.py` 提供 `create-user` / `disable-user` / `reset-password` / `list-users`，直写服务端数据目录。
 - **CLI 登录**：`python aidev-operator.py login --user <名> --password <口令>` 成功后，令牌写入 `~/.signet/client.json`（`token` 字段），此后两个 CLI 的所有动词自动以 `Authorization: Bearer` 携带。同一用户连续 5 次口令错误后，后续登录请求返回 429，成功登录即重置计数。
-- **浏览器登录**：未登录访问 `GET /` 重定向 `/login`；登录成功持有 HttpOnly + SameSite=Lax 会话 cookie，`GET /` 呈现当前用户 alias。会话存内存表，服务重启即失效。
+- **浏览器登录**：未登录访问 `GET /` 重定向 `/login`；登录成功持有 HttpOnly + SameSite=Lax 会话 cookie，`GET /` 呈现平台概况（当前用户、任务计数、待验收、最近事件）。会话存内存表，服务重启即失效。
 - **身份锁定**：服务端以凭据身份覆盖请求体中的 `actor` / `on_behalf_of`，事件链归因恒等于凭据身份（`--actor` 参数仅保留签名兼容）。
 - **handoff 能力令牌（sigt）**：`sigt-<b64url(json{v,task,actor,repo})>-<hmac256-32hex>`，签名 = HMAC-SHA256(key=server-secret, message=b64 段) 前 32 个 hex；claim 的编排响应经 `handoff_token` 字段签发。`aidev-agent.py handoff-inspect <令牌>` 纯本地解析 + 验签（读本机 secret，不联网），输出 `v/task/actor/repo` 与 `valid`。
 - **授权域**：sigt 调 operator 面端点一律 403；sigt 任务与路径 task_id 不一致一律 403；claim 以外动词要求任务活跃租约由令牌 actor 持有，否则 403。
