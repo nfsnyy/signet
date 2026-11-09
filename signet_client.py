@@ -3,9 +3,15 @@
 aidev-agent.py / aidev-operator.py 两个入口脚本共用本模块，只做三件事：
 参数解析、HTTP 请求、JSON 透传。平台业务逻辑全部在服务端（aidev.web），
 本模块不得 import aidev 的任何子模块。
+
+凭据纪律：CLI 令牌只保存在本机 ~/.signet/client.json，仅随请求发给
+SIGNET_BASE_URL 指向的本平台服务，绝不外发。
 """
 
 import argparse
+import base64
+import hashlib
+import hmac
 import json
 import os
 import sys
@@ -18,6 +24,8 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 REQUEST_TIMEOUT = 60
 HTTP_EXIT_CODES = {400: 2, 409: 3}
 ROLE_HEADER = "X-Signet-Role"
+CLIENT_FILE = "client.json"
+SECRET_FILE = "server-secret"
 
 
 class ClientInputError(Exception):
@@ -44,11 +52,15 @@ def user_home():
     return Path.home()
 
 
+def client_config_path():
+    return user_home() / ".signet" / CLIENT_FILE
+
+
 def resolve_base_url():
     env_url = os.environ.get("SIGNET_BASE_URL")
     if env_url and env_url.strip():
         return env_url.rstrip("/")
-    config_path = user_home() / ".signet" / "client.json"
+    config_path = client_config_path()
     if config_path.is_file():
         try:
             config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -59,6 +71,32 @@ def resolve_base_url():
             if isinstance(base_url, str) and base_url.strip():
                 return base_url.rstrip("/")
     return DEFAULT_BASE_URL
+
+
+def resolve_token():
+    config_path = client_config_path()
+    if not config_path.is_file():
+        return None
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    token = config.get("token")
+    return token if isinstance(token, str) and token.strip() else None
+
+
+def store_client_config(base_url, token, user=None):
+    directory = client_config_path().parent
+    directory.mkdir(parents=True, exist_ok=True)
+    config = {"base_url": base_url, "token": token}
+    if user:
+        config["user"] = user
+    client_config_path().write_text(
+        json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def decode_json(raw):
@@ -89,10 +127,12 @@ def encode_multipart(fields, files):
 _REQUEST_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def perform(method, url, fields=None, files=None, role=None):
+def perform(method, url, fields=None, files=None, role=None, token=None):
     headers = {}
     if role:
         headers[ROLE_HEADER] = role
+    if token:
+        headers["Authorization"] = "Bearer " + token
     if files is not None:
         body, content_type = encode_multipart(fields or {}, files)
         headers["Content-Type"] = content_type
@@ -186,6 +226,8 @@ def build_request(role, arguments):
     command = arguments.command
     if command == "health":
         return "GET", "/api/health", None, None
+    if command == "login":
+        return "POST", "/api/login", {"user": arguments.user, "password": arguments.password}, None
     if command == "log":
         query = urllib.parse.urlencode({"repo": arguments.repo})
         return "GET", f"/api/tasks/{arguments.task_id}/events?{query}", None, None
@@ -299,10 +341,50 @@ def build_request(role, arguments):
     raise ClientInputError("operation.unsupported", f"unsupported command: {command}")
 
 
+def inspect_handoff(token):
+    """纯本地解析并验签 handoff 能力令牌（sigt），不联网。
+
+    读取本机 ~/.signet/server-secret 复算 HMAC-SHA256 签名（取前 32 个
+    hex 字符）并与令牌签名段比对；输出 v/task/actor/repo 与 valid 字段。
+    """
+    if not isinstance(token, str) or not token.startswith("sigt-"):
+        return emit_error("sigt.invalid", "token is not a well-formed sigt", {}, 2)
+    rest = token[len("sigt-"):]
+    if "-" not in rest:
+        return emit_error("sigt.invalid", "token is not a well-formed sigt", {}, 2)
+    segment, signature = rest.rsplit("-", 1)
+    try:
+        padded = segment + "=" * (-len(segment) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        payload = None
+    if not isinstance(payload, dict):
+        return emit_error("sigt.invalid", "token payload is not valid base64url JSON", {}, 2)
+    secret_path = user_home() / ".signet" / SECRET_FILE
+    try:
+        secret = secret_path.read_bytes()
+    except OSError:
+        return emit_error("auth.secret_missing", f"server secret does not exist: {secret_path}", {}, 2)
+    expected = hmac.new(secret, segment.encode("ascii"), hashlib.sha256).hexdigest()[:32]
+    valid = hmac.compare_digest(expected, signature)
+    result = {
+        "v": payload.get("v"),
+        "task": payload.get("task"),
+        "actor": payload.get("actor"),
+        "repo": payload.get("repo"),
+        "valid": valid,
+    }
+    print(json.dumps({"ok": True, "result": result}, ensure_ascii=True, sort_keys=True))
+    return 0
+
+
 def parser_for(role):
     parser = argparse.ArgumentParser(prog=f"aidev-{role}")
     subparsers = parser.add_subparsers(dest="command", required=True)
     if role == "operator":
+        login = subparsers.add_parser("login")
+        login.add_argument("--user", required=True)
+        login.add_argument("--password", required=True)
         repository = subparsers.add_parser("init-repository")
         repository.add_argument("--repo", required=True)
         repository.add_argument("--actor", required=True)
@@ -400,6 +482,8 @@ def parser_for(role):
         inbox.add_argument("--repo", required=True)
         inbox.add_argument("--task-id")
     else:
+        inspect_parser = subparsers.add_parser("handoff-inspect")
+        inspect_parser.add_argument("token")
         claim_parser = subparsers.add_parser("claim")
         claim_parser.add_argument("--workspace", required=True)
         claim_parser.add_argument("--actor", required=True)
@@ -460,18 +544,33 @@ def run(role, argv=None):
             pass
     parser = parser_for(role)
     arguments = parser.parse_args(argv)
+    if arguments.command == "handoff-inspect":
+        return inspect_handoff(arguments.token)
     try:
         method, path, fields, files = build_request(role, arguments)
     except ClientInputError as error:
         return emit_error(error.code, error.message, error.details, error.exit_code)
     base_url = resolve_base_url()
+    token = None if arguments.command == "login" else resolve_token()
     try:
-        status, payload = perform(method, base_url + path, fields=fields, files=files, role=role)
+        status, payload = perform(method, base_url + path, fields=fields, files=files, role=role, token=token)
     except ServiceUnavailable as error:
         print(f"错误：无法连接 signet 平台服务（{base_url}）：{error.reason}", file=sys.stderr)
         print("请先启动服务（例如：python -m aidev.web.server，默认监听 127.0.0.1:8000），", file=sys.stderr)
         print("或通过环境变量 SIGNET_BASE_URL 或 ~/.signet/client.json 指定已启动的服务地址。", file=sys.stderr)
         return 3
+    if arguments.command == "login" and status == 200 and isinstance(payload, dict) and payload.get("ok"):
+        result = payload.get("result") or {}
+        store_client_config(base_url, result.get("token"), result.get("user"))
+        print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+        return 0
+    if isinstance(payload, dict) and payload.get("ok") is True and "result" in payload:
+        print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+        return 0
+    if isinstance(payload, dict) and payload.get("ok") is False and isinstance(payload.get("error"), dict):
+        error = payload["error"]
+        print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+        return HTTP_EXIT_CODES.get(status, 4)
     if status == 200 and isinstance(payload, dict):
         print(json.dumps({"ok": True, "result": payload}, ensure_ascii=True, sort_keys=True))
         return 0

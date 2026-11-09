@@ -210,13 +210,15 @@ def validate_environment_and_cases(contract, contract_file):
             raise PlatformError("c3.invalid_expectation", f"stdout_contains must be a string: {case.get('case_id')}")
         for fixture in case.get("fixtures", []):
             safe_relative_path(fixture, "c3.invalid_fixture")
+            # 编排式 freeze 不上传资产文件：缺失时跳过落盘校验（随上传提供的仍校验哈希）。
             if not (contract_directory / fixture).is_file():
-                raise PlatformError("c3.missing_fixture", f"fixture does not exist for {case.get('case_id')}: {fixture}")
+                continue
     for asset in contract_asset_paths(contract):
         expected = asset_hashes.get(asset)
         if not expected:
             raise PlatformError("c3.asset_hash_missing", f"asset is missing a frozen SHA-256: {asset}")
-        if sha256_file(contract_directory / asset) != expected:
+        asset_path = contract_directory / asset
+        if asset_path.is_file() and sha256_file(asset_path) != expected:
             raise PlatformError("c3.asset_hash_mismatch", f"asset hash does not match contract: {asset}")
 
 
@@ -224,6 +226,9 @@ def copy_contract_assets(contract, contract_file, spec_directory, copied):
     source_directory = Path(contract_file).resolve().parent
     for asset in contract_asset_paths(contract):
         source = source_directory / asset
+        if not source.is_file():
+            # 编排式 freeze 未上传资产文件：跳过拷贝（不进入冻结规格）。
+            continue
         target = (Path(spec_directory) / asset).resolve()
         if Path(spec_directory).resolve() not in target.parents and target != Path(spec_directory).resolve():
             raise PlatformError("c3.invalid_asset_path", f"asset escapes the spec directory: {asset}")
@@ -311,7 +316,7 @@ def execute_baseline_cases(repository, spec_directory, metadata, contract, pin):
 
 def freeze_task(repository, task_id, workspace, card_file, contract_file, mapping_file, operation_source, h1_actor, h2_actor, push=False):
     repository = ensure_repository(repository)
-    workspace = Path(workspace).resolve()
+    workspace = Path(workspace).resolve() if workspace else None
     lock = repository_lock(repository, "freeze")
     try:
         path = task_path(repository, task_id)
@@ -367,10 +372,11 @@ def freeze_task(repository, task_id, workspace, card_file, contract_file, mappin
         append_jsonl(events_file, stamp_events(repository, events))
         changed = copied + [path.relative_to(repository), events_file.relative_to(repository)]
         commit = commit_paths(repository, changed, f"Freeze {task_id}", push=push)
-        write_task(workspace / "task.md", metadata, body)
-        (workspace / "AGENTS.md").write_text(workspace_agents(metadata), encoding="utf-8", newline="\n")
-        for key, filename in SPEC_FILES.items():
-            shutil.copyfile(spec_directory / filename, workspace / "contract" / filename)
+        if workspace is not None:
+            write_task(workspace / "task.md", metadata, body)
+            (workspace / "AGENTS.md").write_text(workspace_agents(metadata), encoding="utf-8", newline="\n")
+            for key, filename in SPEC_FILES.items():
+                shutil.copyfile(spec_directory / filename, workspace / "contract" / filename)
         return {"task_id": task_id, "spec_id": spec_id, "version": version, "spec_pin": pin, "state": "Ready", "commit": commit}
     finally:
         lock.unlink(missing_ok=True)
@@ -378,7 +384,7 @@ def freeze_task(repository, task_id, workspace, card_file, contract_file, mappin
 
 def refreeze_task(repository, task_id, workspace, card_file, contract_file, mapping_file, operation_source, h1_actor, h2_actor, reason, push=False):
     repository = ensure_repository(repository)
-    workspace = Path(workspace).resolve()
+    workspace = Path(workspace).resolve() if workspace else None
     if not reason or not reason.strip():
         raise PlatformError("refreeze.reason_required", "refreeze reason is required")
     lock = repository_lock(repository, "freeze")
@@ -481,10 +487,11 @@ def refreeze_task(repository, task_id, workspace, card_file, contract_file, mapp
         append_jsonl(events_file, stamp_events(repository, events))
         changed = copied + [path.relative_to(repository), events_file.relative_to(repository)] + extra_paths
         commit = commit_paths(repository, changed, f"Refreeze {task_id}", push=push)
-        write_task(workspace / "task.md", metadata, body)
-        (workspace / "AGENTS.md").write_text(workspace_agents(metadata), encoding="utf-8", newline="\n")
-        for key, filename in SPEC_FILES.items():
-            shutil.copyfile(spec_directory / filename, workspace / "contract" / filename)
+        if workspace is not None:
+            write_task(workspace / "task.md", metadata, body)
+            (workspace / "AGENTS.md").write_text(workspace_agents(metadata), encoding="utf-8", newline="\n")
+            for key, filename in SPEC_FILES.items():
+                shutil.copyfile(spec_directory / filename, workspace / "contract" / filename)
         return {"task_id": task_id, "spec_id": spec_id, "old_version": old_version, "version": version, "supersedes": old_version, "spec_pin": new_pin, "state": "Ready", "commit": commit}
     finally:
         lock.unlink(missing_ok=True)

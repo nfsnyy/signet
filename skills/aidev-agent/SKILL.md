@@ -30,17 +30,24 @@ whenToUse: 当任务位于 aidev 工作区（目录里含 task.md、AGENTS.md、
 
 | 动词 | 作用 | 关键参数 | 前置条件 |
 |---|---|---|---|
-| `status` | 查看任务状态、inbox/outbox-collab 文件列表（只读） | `--workspace` | 无 |
-| `log` | 回放任务事件日志（只读） | `--repo`、`--task-id` | 无 |
+| `status` | 查看任务状态、inbox/outbox-collab 文件列表（只读） | `--workspace` | 已登录（CLI 自动携带令牌） |
+| `log` | 回放任务事件日志（只读） | `--repo`、`--task-id` | 已登录 |
 | `claim` | 领取任务，生成 claim 提案 | `--actor`、`--on-behalf-of` | 任务 Ready、无活跃租约、contract/ 哈希与 pin 一致 |
 | `submit` | 提交实现，生成 submit 提案 | `--actor`、`--on-behalf-of`、`--report <文件>`、`--evidence <文件>`（可重复） | 任务 In Progress 且**你持有活跃租约** |
 | `block` | 因定义/前提问题阻塞任务 | `--actor`、`--on-behalf-of`、`--reason`、`--evidence`（可重复） | 任务 In Progress 且你持有租约 |
 | `enhancement` | 登记后续改进想法（不改变当前范围） | `--actor`、`--on-behalf-of`、`--title`、`--details` | 任务 In Progress 且你持有租约 |
 | `collab-send` | 向另一个任务发协作消息 | `--type`、`--to-task`、`--summary`、`--details` | 见第 4 节 |
 | `collab-answer` | 应答发给你任务的协作消息 | `--message-id`、`--action`、`--note` | 消息在 inbox/ 且轮到你 |
+| `handoff-inspect` | 纯本地解析并验签 handoff 能力令牌（sigt），输出 v/task/actor/repo 与 valid，不联网 | `<令牌>`（位置参数） | 读本机 `~/.signet/server-secret` |
 | `health` | 检查平台服务连通性（只读探针） | 无 | 无 |
 
-operator 面动词（`init-repository/init-task/freeze/refreeze/sync/verify/reject/close/void/adjudicate/veto/inbox`）**不是你用的**，不要尝试调用。
+operator 面动词（`init-repository/init-task/freeze/refreeze/sync/verify/reject/close/void/adjudicate/veto/inbox/login`）**不是你用的**，不要尝试调用。
+
+## 1.1 登录与凭据（T2 起）
+
+- 平台全部 API（除 `/api/health` 与 `/api/login`）都要求凭据：CLI 用户先用 `aidev-operator.py login --user <名> --password <口令>` 登录，令牌写入 `~/.signet/client.json`，此后两个 CLI 的所有动词自动以 `Authorization: Bearer` 携带。
+- 服务端按凭据身份覆盖请求体中的 `actor` / `on_behalf_of`：事件归因永远等于凭据身份，`--actor` 参数仅保留签名兼容。
+- 凭据纪律：CLI 令牌与 handoff 令牌只在本机、本工作区内使用，绝不外发；`handoff-inspect` 只读本机 secret，不联网。
 
 ## 2. 硬性约束（违反会被拒绝或作废）
 

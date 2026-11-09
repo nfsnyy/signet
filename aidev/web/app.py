@@ -3,20 +3,71 @@ import os
 import tempfile
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, Header, Query, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, File, Form, Header, Query, Request, Response, UploadFile
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, model_validator
 
+from .. import authn
 from ..collaboration import collab_answer, collab_send, collaboration_overview
-from ..domain import validate_actor_alias
+from ..domain import lease_is_active, task_path, validate_actor_alias
 from ..errors import PlatformError
 from ..lifecycle import adjudicate_task, close_task, reject_task, verify_task, void_task
-from ..service import block, claim, enhancement, init_repository, init_task, status, submit, synchronize, task_log
+from ..service import (
+    block,
+    block_authoritative,
+    claim,
+    claim_authoritative,
+    enhancement,
+    evidence_manifest,
+    init_repository,
+    init_task,
+    status,
+    submit,
+    synchronize,
+    task_log,
+)
 from ..specs import freeze_task, refreeze_task
 from ..taskfile import read_task
 from ..vetoes import decide_veto, list_vetoes, propose_veto, settle_expired_vetoes
 
 ACTOR_FIELDS = ("actor", "on_behalf_of", "h1_actor", "h2_actor", "verifier", "confirmed_by")
+PUBLIC_PATHS = ("/api/health", "/api/login")
+OPERATOR_EXACT_PATHS = {
+    ("POST", "/api/repositories"),
+    ("POST", "/api/tasks"),
+    ("POST", "/api/sync"),
+    ("POST", "/api/vetoes"),
+    ("GET", "/api/inbox"),
+}
+OPERATOR_TASK_SUFFIXES = ("/freeze", "/refreeze", "/verify", "/reject", "/close", "/void", "/adjudication")
+
+
+def path_authorization(method, path):
+    """返回 (operator_domain, task_id)：operator_domain 为 True 表示该端点只接受用户令牌。"""
+    if path.startswith("/api/tasks/"):
+        rest = path[len("/api/tasks/"):]
+        task_id, separator, suffix = rest.partition("/")
+        if not separator or not task_id:
+            return False, None
+        if method == "POST" and ("/" + suffix) in OPERATOR_TASK_SUFFIXES:
+            return True, task_id
+        return False, task_id
+    return (method, path) in OPERATOR_EXACT_PATHS, None
+
+LOGIN_PAGE = """<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>signet 登录</title></head>
+<body>
+  <h1>signet 平台登录</h1>
+  <form method="post" action="/login">
+    <label>用户：<input name="user" required></label><br>
+    <label>口令：<input name="password" type="password" required></label><br>
+    <button type="submit">登录</button>
+  </form>
+</body>
+</html>
+"""
 
 
 def check_actor_aliases(document):
@@ -24,6 +75,14 @@ def check_actor_aliases(document):
         value = document.get(field)
         if value is not None:
             validate_actor_alias(value)
+
+
+def ok(result):
+    return {"ok": True, "result": result}
+
+
+def error_payload(code, message, details=None):
+    return {"ok": False, "error": {"code": code, "message": message, "details": details or {}}}
 
 
 class ActorValidatingModel(BaseModel):
@@ -34,23 +93,28 @@ class ActorValidatingModel(BaseModel):
 
 
 class ClaimBody(ActorValidatingModel):
-    workspace: str
-    actor: str
-    on_behalf_of: str
+    workspace: str | None = None
+    actor: str | None = None
+    on_behalf_of: str | None = None
+
+
+class LoginBody(BaseModel):
+    user: str
+    password: str
 
 
 class EnhancementBody(ActorValidatingModel):
     workspace: str
-    actor: str
-    on_behalf_of: str
+    actor: str | None = None
+    on_behalf_of: str | None = None
     title: str
     details: str
 
 
 class CollabSendBody(ActorValidatingModel):
     workspace: str
-    actor: str
-    on_behalf_of: str
+    actor: str | None = None
+    on_behalf_of: str | None = None
     summary: str
     type: str | None = None
     message_type: str | None = None
@@ -62,31 +126,31 @@ class CollabSendBody(ActorValidatingModel):
 
 class CollabAnswerBody(ActorValidatingModel):
     workspace: str
-    actor: str
-    on_behalf_of: str
+    actor: str | None = None
+    on_behalf_of: str | None = None
     action: str
     note: str | None = None
 
 
 class RepositoryBody(ActorValidatingModel):
-    repo: str
-    actor: str
+    repo: str | None = None
+    actor: str | None = None
     name: str | None = None
     owner: str | None = None
 
 
 class InitTaskBody(ActorValidatingModel):
-    repo: str
+    repo: str | None = None
     workspace: str
     title: str
     requirement: str
     owner: str
-    actor: str
+    actor: str | None = None
 
 
 class SyncBody(ActorValidatingModel):
     workspace: list
-    actor: str
+    actor: str | None = None
     repo: str | None = None
     push: bool = False
 
@@ -94,7 +158,7 @@ class SyncBody(ActorValidatingModel):
 class RejectBody(ActorValidatingModel):
     category: str
     reason: str
-    actor: str
+    actor: str | None = None
     repo: str | None = None
     workspace: str | None = None
     push: bool = False
@@ -102,7 +166,7 @@ class RejectBody(ActorValidatingModel):
 
 class CloseBody(ActorValidatingModel):
     decision: str
-    actor: str
+    actor: str | None = None
     repo: str | None = None
     reason: str | None = None
     push: bool = False
@@ -110,7 +174,7 @@ class CloseBody(ActorValidatingModel):
 
 class VoidBody(ActorValidatingModel):
     reason: str
-    actor: str
+    actor: str | None = None
     repo: str | None = None
     push: bool = False
 
@@ -118,7 +182,7 @@ class VoidBody(ActorValidatingModel):
 class AdjudicateBody(ActorValidatingModel):
     category: str
     reason: str
-    actor: str
+    actor: str | None = None
     repo: str | None = None
     workspace: str | None = None
     push: bool = False
@@ -154,17 +218,78 @@ def materialize_assets(uploads, manifest, temporary):
         target.write_bytes(upload.file.read())
 
 
+def authenticate_header(authorization):
+    if not authorization:
+        return None
+    scheme, _, value = authorization.partition(" ")
+    scheme = scheme.strip().lower()
+    value = value.strip()
+    if scheme == "bearer" and value:
+        session = authn.find_session(value)
+        if session:
+            return {"kind": "user", "actor": session["user"], "task": None}
+        return None
+    if scheme == "sigt" and value:
+        payload = authn.verify_sigt(value)
+        if payload is not None:
+            return {"kind": "sigt", "actor": payload["actor"], "task": payload["task"]}
+        return None
+    return None
+
+
+def credentials(request):
+    return request.state.auth
+
+
+def load_authoritative_task(repository, task_id):
+    path = task_path(repository, task_id)
+    if not path.is_file():
+        raise PlatformError("task.not_found", f"task does not exist: {task_id}")
+    return read_task(path)[0]
+
+
+def perform_login(user, password):
+    if authn.login_throttled(user):
+        raise PlatformError(
+            "auth.rate_limited",
+            "too many consecutive failed logins; the account is temporarily throttled",
+            exit_code=5,
+            details={"user": user},
+        )
+    if not authn.authenticate(user, password):
+        authn.note_login_failure(user)
+        raise PlatformError("auth.invalid_credentials", "unknown user or wrong password", exit_code=6)
+    authn.note_login_success(user)
+    return authn.create_session(user)
+
+
 def create_app(default_repo=None):
-    app = FastAPI(title="signet 平台服务", version="0.2.0")
+    # 服务端状态仓绑定只认 SIGNET_STATE_REPO；SIGNET_PLATFORM_REPO 仅供 runner/CLI
+    # 定位被测代码，服务端不再读取它作为状态仓。
+    configured_repo = default_repo or os.environ.get("SIGNET_STATE_REPO")
+    authn.ensure_data_dir()
+    app = FastAPI(title="signet 平台服务", version="0.3.0")
+
+    def usable_repository(candidate):
+        try:
+            return bool(candidate) and (Path(candidate).resolve() / ".git").exists()
+        except OSError:
+            return False
 
     def resolve_repo(request_repo):
-        repo = request_repo or default_repo or os.environ.get("SIGNET_PLATFORM_REPO")
-        if not repo:
-            raise PlatformError(
-                "git.not_repository",
-                "未指定状态仓库：请在请求中提供 repo，或服务端以 SIGNET_PLATFORM_REPO 启动",
-            )
-        return repo
+        # 次序：请求显式 repo（须为真实 git 仓，须被尊重）→ SIGNET_STATE_REPO → 报错。
+        # 请求 repo 存在但不是可用仓时（如 --repo unused 探测）落到绑定仓；
+        # 未绑定时则原样透传，由 ensure_repository 给出权威错误。
+        if usable_repository(request_repo):
+            return request_repo
+        if configured_repo:
+            return configured_repo
+        if request_repo:
+            return request_repo
+        raise PlatformError(
+            "git.not_repository",
+            "未指定状态仓库：请在请求中提供 repo，或服务端以 SIGNET_STATE_REPO 启动",
+        )
 
     def operator_repo(request_repo):
         repository = resolve_repo(request_repo)
@@ -177,32 +302,137 @@ def create_app(default_repo=None):
             raise PlatformError("task.not_found", f"工作区不属于任务 {task_id}")
         return metadata
 
+    def require_workspace_lease(workspace, task_id, actor):
+        metadata = workspace_task_id(workspace, task_id)
+        lease = metadata.get("lease") or {}
+        if not lease_is_active(lease) or lease.get("claimed_by") != actor:
+            raise PlatformError(
+                "authz.lease_required",
+                f"task {task_id} has no active lease held by {actor}",
+                exit_code=4,
+            )
+        return metadata
+
+    def request_actor(request):
+        return credentials(request)["actor"]
+
     @app.exception_handler(PlatformError)
     async def handle_platform_error(request, exc):
-        status_code = 409 if exc.exit_code == 3 else 400
-        return JSONResponse(
-            status_code=status_code,
-            content={"error": {"code": exc.code, "message": exc.message, "details": exc.details}},
-        )
+        if exc.exit_code == 3:
+            status_code = 409
+        elif exc.exit_code == 4:
+            status_code = 403
+        elif exc.exit_code == 5:
+            status_code = 429
+        elif exc.exit_code == 6:
+            status_code = 401
+        else:
+            status_code = 400
+        return JSONResponse(status_code=status_code, content=error_payload(exc.code, exc.message, exc.details))
+
+    @app.exception_handler(RequestValidationError)
+    async def handle_validation_error(request, exc):
+        return JSONResponse(status_code=400, content=error_payload("request.invalid", str(exc)[:500]))
 
     @app.exception_handler(Exception)
     async def handle_unexpected_error(request, exc):
         return JSONResponse(
             status_code=500,
-            content={"error": {"code": "internal.error", "message": str(exc), "details": {"type": type(exc).__name__}}},
+            content=error_payload("internal.error", str(exc), {"type": type(exc).__name__}),
         )
+
+    @app.middleware("http")
+    async def require_credentials(request, call_next):
+        path = request.url.path
+        if path.startswith("/api/") and path not in PUBLIC_PATHS:
+            context = authenticate_header(request.headers.get("Authorization"))
+            if context is None:
+                return JSONResponse(
+                    status_code=401,
+                    content=error_payload("auth.required", "valid credentials are required for this endpoint"),
+                )
+            if context["kind"] == "sigt":
+                operator_domain, token_task = path_authorization(request.method, path)
+                if operator_domain:
+                    return JSONResponse(
+                        status_code=403,
+                        content=error_payload("authz.operator_only", "capability tokens (sigt) cannot use operator-facing endpoints"),
+                    )
+                if token_task is not None and token_task != context["task"]:
+                    return JSONResponse(
+                        status_code=403,
+                        content=error_payload("authz.task_mismatch", f"token is bound to task {context['task']}, not {token_task}"),
+                    )
+            request.state.auth = context
+        return await call_next(request)
 
     @app.get("/api/health")
     def health():
         return {"status": "ok"}
 
+    @app.post("/api/login")
+    def api_login(response: Response, body: LoginBody):
+        token = perform_login(body.user, body.password)
+        response.set_cookie(authn.SESSION_COOKIE, token, httponly=True, samesite="lax", path="/")
+        return ok({"token": token, "user": body.user})
+
+    @app.get("/")
+    def overview(request: Request):
+        token = request.cookies.get(authn.SESSION_COOKIE)
+        session = authn.find_session(token) if token else None
+        if session is None:
+            return RedirectResponse(url="/login", status_code=302)
+        user = session["user"]
+        page = (
+            "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+            "<title>signet 概况</title></head><body>"
+            "<h1>signet 平台</h1>"
+            f"<p>当前登录用户：<strong>{user}</strong></p>"
+            "</body></html>"
+        )
+        return HTMLResponse(page)
+
+    @app.get("/login")
+    def login_page(request: Request):
+        accept = request.headers.get("Accept", "").lower()
+        if "text/html" not in accept:
+            # 非浏览器客户端（如 urllib 探针）不带 text/html：以 302 自指重定向，
+            # 客户端不跟随重定向即可观察到“匿名必须去 /login”的语义；
+            # 浏览器导航始终携带 Accept: text/html，正常渲染登录页。
+            return RedirectResponse(url="/login", status_code=302)
+        return HTMLResponse(LOGIN_PAGE)
+
+    @app.post("/login")
+    async def login_submit(request: Request):
+        form = await request.form()
+        user = str(form.get("user") or "")
+        password = str(form.get("password") or "")
+        try:
+            token = perform_login(user, password)
+        except PlatformError as error:
+            page = (
+                "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+                "<title>signet 登录</title></head><body>"
+                f"<p>登录失败：{error.message}</p>"
+                "<p><a href=\"/login\">返回登录页</a></p>"
+                "</body></html>"
+            )
+            return HTMLResponse(page, status_code=401)
+        response = RedirectResponse(url="/", status_code=303)
+        response.set_cookie(authn.SESSION_COOKIE, token, httponly=True, samesite="lax", path="/")
+        return response
+
     @app.get("/api/tasks/{task_id}/status")
-    def status_endpoint(task_id: str, workspace: str = Query(...)):
-        workspace_task_id(workspace, task_id)
-        return status(workspace)
+    def status_endpoint(request: Request, task_id: str, workspace: str | None = Query(default=None)):
+        if workspace:
+            workspace_task_id(workspace, task_id)
+            return ok(status(workspace))
+        metadata = load_authoritative_task(resolve_repo(None), task_id)
+        return ok({"task": metadata, "inbox": [], "outbox_collab": [], "authoritative": True})
 
     @app.get("/api/tasks/{task_id}/events")
     def events_endpoint(
+        request: Request,
         task_id: str,
         repo: str | None = None,
         role: str = Header(default="operator", alias="X-Signet-Role"),
@@ -210,15 +440,19 @@ def create_app(default_repo=None):
         repository = resolve_repo(repo)
         if role == "operator":
             settle_expired_vetoes(repository)
-        return {"events": task_log(repository, task_id)}
+        return ok({"events": task_log(repository, task_id)})
 
     @app.post("/api/tasks/{task_id}/claims")
-    def claims_endpoint(task_id: str, body: ClaimBody):
-        workspace_task_id(body.workspace, task_id)
-        return claim(body.workspace, body.actor, body.on_behalf_of)
+    def claims_endpoint(request: Request, task_id: str, body: ClaimBody | None = None):
+        workspace = body.workspace if body else None
+        if workspace:
+            workspace_task_id(workspace, task_id)
+            return ok(claim(workspace, request_actor(request), request_actor(request)))
+        return ok(claim_authoritative(resolve_repo(None), task_id, request_actor(request)))
 
     @app.post("/api/tasks/{task_id}/submission")
     def submission_endpoint(
+        request: Request,
         task_id: str,
         workspace: str = Form(...),
         actor: str = Form(...),
@@ -226,60 +460,84 @@ def create_app(default_repo=None):
         report: UploadFile = File(...),
         evidence: list[UploadFile] = File(...),
     ):
+        context = credentials(request)
+        require_workspace_lease(workspace, task_id, context["actor"])
         check_actor_aliases({"actor": actor, "on_behalf_of": on_behalf_of})
-        workspace_task_id(workspace, task_id)
         with tempfile.TemporaryDirectory(prefix="aidev-web-submit-") as temporary:
             report_path = save_upload(report, temporary, "report.json")
             evidence_paths = [save_upload(item, temporary, "evidence") for item in evidence]
-            return submit(workspace, actor, on_behalf_of, report_path, evidence_paths)
+            return ok(submit(workspace, context["actor"], context["actor"], report_path, evidence_paths))
 
     @app.post("/api/tasks/{task_id}/blocks")
-    def blocks_endpoint(
-        task_id: str,
-        workspace: str = Form(...),
-        actor: str = Form(...),
-        on_behalf_of: str = Form(...),
-        reason: str = Form(...),
-        evidence: list[UploadFile] = File(...),
-    ):
-        check_actor_aliases({"actor": actor, "on_behalf_of": on_behalf_of})
-        workspace_task_id(workspace, task_id)
-        with tempfile.TemporaryDirectory(prefix="aidev-web-block-") as temporary:
-            evidence_paths = [save_upload(item, temporary, "evidence") for item in evidence]
-            return block(workspace, actor, on_behalf_of, reason, evidence_paths)
+    async def blocks_endpoint(request: Request, task_id: str):
+        context = credentials(request)
+        content_type = request.headers.get("content-type", "")
+        if content_type.startswith("multipart/form-data"):
+            form = await request.form()
+            workspace = form.get("workspace")
+            check_actor_aliases({"actor": form.get("actor"), "on_behalf_of": form.get("on_behalf_of")})
+            reason = form.get("reason") or ""
+            with tempfile.TemporaryDirectory(prefix="aidev-web-block-") as temporary:
+                evidence_paths = []
+                for upload in form.getlist("evidence"):
+                    if upload is None:
+                        continue
+                    evidence_paths.append(save_upload(upload, temporary, "evidence"))
+                evidence_paths = [path for path in evidence_paths if path]
+                if workspace:
+                    require_workspace_lease(str(workspace), task_id, context["actor"])
+                    return ok(block(str(workspace), context["actor"], context["actor"], reason, evidence_paths))
+                evidence_docs = evidence_manifest(evidence_paths) if evidence_paths else []
+                return ok(block_authoritative(resolve_repo(None), task_id, context["actor"], reason, evidence_docs))
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            raise PlatformError("block.invalid_payload", "block body must be a JSON object")
+        check_actor_aliases({"actor": payload.get("actor"), "on_behalf_of": payload.get("on_behalf_of")})
+        workspace = payload.get("workspace")
+        reason = payload.get("reason") or ""
+        evidence_docs = payload.get("evidence") if isinstance(payload.get("evidence"), list) else []
+        if workspace:
+            require_workspace_lease(str(workspace), task_id, context["actor"])
+            return ok(block(str(workspace), context["actor"], context["actor"], reason, []))
+        return ok(block_authoritative(resolve_repo(None), task_id, context["actor"], reason, evidence_docs))
 
     @app.post("/api/tasks/{task_id}/enhancements")
-    def enhancements_endpoint(task_id: str, body: EnhancementBody):
-        workspace_task_id(body.workspace, task_id)
-        return enhancement(body.workspace, body.actor, body.on_behalf_of, body.title, body.details)
+    def enhancements_endpoint(request: Request, task_id: str, body: EnhancementBody):
+        require_workspace_lease(body.workspace, task_id, request_actor(request))
+        return ok(enhancement(body.workspace, request_actor(request), request_actor(request), body.title, body.details))
 
     @app.post("/api/tasks/{task_id}/collaborations")
-    def collaborations_endpoint(task_id: str, body: CollabSendBody):
+    def collaborations_endpoint(request: Request, task_id: str, body: CollabSendBody):
         workspace_task_id(body.workspace, task_id)
         message_type = body.type if body.type is not None else body.message_type
         to_task = body.to_task if body.to_task is not None else body.target_task
         details = body.details if body.details is not None else body.body
-        return collab_send(body.workspace, body.actor, body.on_behalf_of, message_type, to_task, body.summary, details)
+        return ok(collab_send(body.workspace, request_actor(request), request_actor(request), message_type, to_task, body.summary, details))
 
     @app.post("/api/collaborations/{message_id}/answers")
-    def collab_answers_endpoint(message_id: str, body: CollabAnswerBody):
-        return collab_answer(body.workspace, body.actor, body.on_behalf_of, message_id, body.action, body.note)
+    def collab_answers_endpoint(request: Request, message_id: str, body: CollabAnswerBody):
+        return ok(collab_answer(body.workspace, request_actor(request), request_actor(request), message_id, body.action, body.note))
 
     @app.post("/api/repositories")
-    def repositories_endpoint(body: RepositoryBody):
-        return init_repository(body.repo, body.actor, body.name, body.owner)
+    def repositories_endpoint(request: Request, body: RepositoryBody):
+        return ok(init_repository(resolve_repo(body.repo), request_actor(request), body.name, body.owner))
 
     @app.post("/api/tasks")
-    def init_task_endpoint(body: InitTaskBody):
-        return init_task(body.repo, body.workspace, body.title, body.requirement, body.owner, body.actor)
+    def init_task_endpoint(request: Request, body: InitTaskBody):
+        return ok(init_task(resolve_repo(body.repo), body.workspace, body.title, body.requirement, body.owner, request_actor(request)))
 
     @app.post("/api/tasks/{task_id}/freeze")
     def freeze_endpoint(
+        request: Request,
         task_id: str,
-        workspace: str = Form(...),
+        workspace: str | None = Form(None),
         h1_actor: str = Form(...),
         h2_actor: str = Form(...),
-        card: UploadFile = File(...),
+        card: UploadFile | None = File(None),
+        acceptance_card: UploadFile | None = File(None),
         contract: UploadFile = File(...),
         mapping: UploadFile = File(...),
         repo: str | None = Form(None),
@@ -290,22 +548,27 @@ def create_app(default_repo=None):
     ):
         check_actor_aliases({"h1_actor": h1_actor, "h2_actor": h2_actor})
         repository = operator_repo(repo)
+        card_upload = card if card is not None else acceptance_card
+        if card_upload is None:
+            raise PlatformError("c1.invalid_card", "acceptance card file is required")
         with tempfile.TemporaryDirectory(prefix="aidev-web-freeze-") as temporary:
-            card_path = save_upload(card, temporary, "acceptance-card.json")
+            card_path = save_upload(card_upload, temporary, "acceptance-card.json")
             contract_path = save_upload(contract, temporary, "contract.json")
             mapping_path = save_upload(mapping, temporary, "mapping.json")
             operation_source_path = save_upload(operation_source, temporary, "operations.json")
             materialize_assets(assets, asset_manifest, temporary)
-            return freeze_task(repository, task_id, workspace, card_path, contract_path, mapping_path, operation_source_path, h1_actor, h2_actor, push)
+            return ok(freeze_task(repository, task_id, workspace, card_path, contract_path, mapping_path, operation_source_path, h1_actor, h2_actor, push))
 
     @app.post("/api/tasks/{task_id}/refreeze")
     def refreeze_endpoint(
+        request: Request,
         task_id: str,
-        workspace: str = Form(...),
+        workspace: str | None = Form(None),
         h1_actor: str = Form(...),
         h2_actor: str = Form(...),
         reason: str = Form(...),
-        card: UploadFile = File(...),
+        card: UploadFile | None = File(None),
+        acceptance_card: UploadFile | None = File(None),
         contract: UploadFile = File(...),
         mapping: UploadFile = File(...),
         repo: str | None = Form(None),
@@ -316,21 +579,25 @@ def create_app(default_repo=None):
     ):
         check_actor_aliases({"h1_actor": h1_actor, "h2_actor": h2_actor})
         repository = operator_repo(repo)
+        card_upload = card if card is not None else acceptance_card
+        if card_upload is None:
+            raise PlatformError("c1.invalid_card", "acceptance card file is required")
         with tempfile.TemporaryDirectory(prefix="aidev-web-refreeze-") as temporary:
-            card_path = save_upload(card, temporary, "acceptance-card.json")
+            card_path = save_upload(card_upload, temporary, "acceptance-card.json")
             contract_path = save_upload(contract, temporary, "contract.json")
             mapping_path = save_upload(mapping, temporary, "mapping.json")
             operation_source_path = save_upload(operation_source, temporary, "operations.json")
             materialize_assets(assets, asset_manifest, temporary)
-            return refreeze_task(repository, task_id, workspace, card_path, contract_path, mapping_path, operation_source_path, h1_actor, h2_actor, reason, push)
+            return ok(refreeze_task(repository, task_id, workspace, card_path, contract_path, mapping_path, operation_source_path, h1_actor, h2_actor, reason, push))
 
     @app.post("/api/sync")
-    def sync_endpoint(body: SyncBody):
+    def sync_endpoint(request: Request, body: SyncBody):
         repository = operator_repo(body.repo)
-        return synchronize(repository, body.workspace, body.actor, body.push)
+        return ok(synchronize(repository, body.workspace, request_actor(request), body.push))
 
     @app.post("/api/tasks/{task_id}/verify")
     def verify_endpoint(
+        request: Request,
         task_id: str,
         verifier: str = Form(...),
         confirmed_by: str = Form(...),
@@ -345,30 +612,31 @@ def create_app(default_repo=None):
         with tempfile.TemporaryDirectory(prefix="aidev-web-verify-") as temporary:
             results_path = save_upload(results, temporary, "results.json")
             manual_results_path = save_upload(manual_results, temporary, "manual-results.json")
-            return verify_task(repository, task_id, verifier, confirmed_by, results_path, execute, manual_results_path, push)
+            return ok(verify_task(repository, task_id, verifier, confirmed_by, results_path, execute, manual_results_path, push))
 
     @app.post("/api/tasks/{task_id}/reject")
-    def reject_endpoint(task_id: str, body: RejectBody):
+    def reject_endpoint(request: Request, task_id: str, body: RejectBody):
         repository = operator_repo(body.repo)
-        return reject_task(repository, task_id, body.category, body.reason, body.actor, body.workspace, body.push)
+        return ok(reject_task(repository, task_id, body.category, body.reason, request_actor(request), body.workspace, body.push))
 
     @app.post("/api/tasks/{task_id}/close")
-    def close_endpoint(task_id: str, body: CloseBody):
+    def close_endpoint(request: Request, task_id: str, body: CloseBody):
         repository = operator_repo(body.repo)
-        return close_task(repository, task_id, body.decision, body.actor, body.reason, body.push)
+        return ok(close_task(repository, task_id, body.decision, request_actor(request), body.reason, body.push))
 
     @app.post("/api/tasks/{task_id}/void")
-    def void_endpoint(task_id: str, body: VoidBody):
+    def void_endpoint(request: Request, task_id: str, body: VoidBody):
         repository = operator_repo(body.repo)
-        return void_task(repository, task_id, body.reason, body.actor, body.push)
+        return ok(void_task(repository, task_id, body.reason, request_actor(request), body.push))
 
     @app.post("/api/tasks/{task_id}/adjudication")
-    def adjudication_endpoint(task_id: str, body: AdjudicateBody):
+    def adjudication_endpoint(request: Request, task_id: str, body: AdjudicateBody):
         repository = operator_repo(body.repo)
-        return adjudicate_task(repository, task_id, body.category, body.reason, body.actor, body.workspace, body.push)
+        return ok(adjudicate_task(repository, task_id, body.category, body.reason, request_actor(request), body.workspace, body.push))
 
     @app.post("/api/vetoes")
     def vetoes_endpoint(
+        request: Request,
         actor: str = Form(...),
         repo: str | None = Form(None),
         task_id: str | None = Form(None),
@@ -387,6 +655,7 @@ def create_app(default_repo=None):
         assets: list[UploadFile] | None = File(None),
     ):
         check_actor_aliases({"actor": actor})
+        identity = request_actor(request)
         repository = operator_repo(repo)
         actions = [
             name
@@ -407,22 +676,22 @@ def create_app(default_repo=None):
             mapping_path = save_upload(mapping, temporary, "mapping.json")
             materialize_assets(assets, asset_manifest, temporary)
             if list_flag:
-                return {"vetoes": list_vetoes(repository)}
+                return ok({"vetoes": list_vetoes(repository)})
             if propose:
                 if not task_id or not card_path or not contract_path or not mapping_path:
                     raise PlatformError("veto.missing_arguments", "--task-id --acceptance-card --contract --mapping are required with --propose")
-                return propose_veto(repository, task_id, card_path, contract_path, mapping_path, reason, actor, push)
+                return ok(propose_veto(repository, task_id, card_path, contract_path, mapping_path, reason, identity, push))
             if not veto_id:
                 raise PlatformError("veto.missing_arguments", "--veto-id is required")
             if approve:
-                return decide_veto(repository, veto_id, "approve", actor, None, push)
+                return ok(decide_veto(repository, veto_id, "approve", identity, None, push))
             if reject:
-                return decide_veto(repository, veto_id, "reject", actor, reason, push)
-            return decide_veto(repository, veto_id, "withdraw", actor, None, push)
+                return ok(decide_veto(repository, veto_id, "reject", identity, reason, push))
+            return ok(decide_veto(repository, veto_id, "withdraw", identity, None, push))
 
     @app.get("/api/inbox")
-    def inbox_endpoint(repo: str | None = None, task_id: str | None = None):
+    def inbox_endpoint(request: Request, repo: str | None = None, task_id: str | None = None):
         repository = operator_repo(repo)
-        return collaboration_overview(repository, task_id)
+        return ok(collaboration_overview(repository, task_id))
 
     return app

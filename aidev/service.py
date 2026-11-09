@@ -3,6 +3,7 @@ import os
 import shutil
 from pathlib import Path
 
+from .authn import mint_sigt
 from .collaboration import process_collaboration_sync, validate_report_collaboration
 from .domain import (
     SPEC_FILES,
@@ -480,3 +481,99 @@ def status(workspace):
 def task_log(repository, task_id):
     repository = ensure_repository(repository)
     return [event for event in read_jsonl(event_path(repository)) if event.get("task_id") == task_id]
+
+
+def claim_authoritative(repository, task_id, actor):
+    """同步授权模式 claim：直接改写权威账本并签发 handoff 令牌。
+
+    用于携带凭据、不带工作区的编排请求；经典提案模式（claim）保持不变。
+    """
+    repository = ensure_repository(repository)
+    path = task_path(repository, task_id)
+    if not path.is_file():
+        raise PlatformError("task.not_found", f"task does not exist: {task_id}")
+    metadata, body = read_task(path)
+    if metadata.get("state") != "Ready":
+        raise PlatformError("claim.not_ready", "only a Ready task can be claimed", details={"state": metadata.get("state")})
+    if lease_is_active(metadata.get("lease")):
+        raise PlatformError("claim.lease_active", "task already has an active lease")
+    proposal = {
+        "proposal_id": new_id("proposal"),
+        "task_id": task_id,
+        "operation": "claim",
+        "actor": actor,
+        "on_behalf_of": actor,
+        "created_at": utc_now(),
+        "base": proposal_base(metadata),
+        "parameters": {},
+        "workspace": None,
+        "local_validation": {"result": "passed", "checked_at": utc_now()},
+    }
+    accepted_event, outcome = apply_claim(proposal, metadata)
+    if accepted_event is None:
+        _rejected_event, result = outcome
+        raise PlatformError(result.get("code", "claim.rejected"), result.get("reason", "claim was rejected"))
+    events_file = event_path(repository)
+    write_task(path, metadata, body)
+    append_jsonl(events_file, stamp_events(repository, [accepted_event]))
+    commit = commit_paths(
+        repository,
+        [path.relative_to(repository), events_file.relative_to(repository)],
+        f"Claim {task_id}",
+    )
+    return {
+        "task_id": task_id,
+        "state": metadata["state"],
+        "lease": metadata["lease"],
+        "handoff_token": mint_sigt(task_id, actor, str(repository)),
+        "authoritative": True,
+        "commit": commit,
+    }
+
+
+def block_authoritative(repository, task_id, actor, reason, evidence):
+    """同步授权模式 block：立即落事件并提交，不改变任务状态与租约。
+
+    编排场景没有 operator sync 周期，任务保持 In Progress（租约继续由
+    持有者持有），void 等后续生命周期动词仍按既有状态机执行。
+    """
+    repository = ensure_repository(repository)
+    if not reason or not reason.strip():
+        raise PlatformError("block.reason_required", "block reason is required")
+    path = task_path(repository, task_id)
+    if not path.is_file():
+        raise PlatformError("task.not_found", f"task does not exist: {task_id}")
+    metadata, _body = read_task(path)
+    if metadata.get("state") != "In Progress":
+        raise PlatformError("block.invalid_state", "only an In Progress task can be blocked", details={"state": metadata.get("state")})
+    lease = metadata.get("lease") or {}
+    if not lease_is_active(lease):
+        raise PlatformError("block.lease_expired", "task lease is not active")
+    if lease.get("claimed_by") != actor:
+        raise PlatformError("block.lease_owner_mismatch", "only the lease holder can block this task")
+    state = metadata["state"]
+    events = [
+        make_event(
+            "task.blocked",
+            task_id,
+            actor,
+            actor,
+            state,
+            state,
+            payload={"reason": reason, "evidence": evidence},
+            entrypoint="agent",
+        ),
+        make_event(
+            "discussion.opened",
+            task_id,
+            "operator",
+            actor,
+            state,
+            state,
+            payload={"topic": "block", "reason": reason},
+        ),
+    ]
+    events_file = event_path(repository)
+    append_jsonl(events_file, stamp_events(repository, events))
+    commit = commit_paths(repository, [events_file.relative_to(repository)], f"Block notice {task_id}")
+    return {"task_id": task_id, "state": state, "authoritative": True, "commit": commit}

@@ -1,6 +1,7 @@
 import atexit
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -10,11 +11,15 @@ import time
 import unittest
 from pathlib import Path
 
+from aidev.domain import ACTOR_PATTERN
 from aidev.taskfile import read_task
 
 ROOT = Path(__file__).resolve().parents[1]
 AGENT_CLI = ROOT / "aidev-agent.py"
 OPERATOR_CLI = ROOT / "aidev-operator.py"
+ADMIN_CLI = ROOT / "aidev-admin.py"
+DEFAULT_TEST_USER = "signet-tester"
+ACTOR_FLAGS = ("--actor", "--h1-actor", "--h2-actor")
 
 TEST_ENV = os.environ.copy()
 TEST_ENV.update({
@@ -46,7 +51,17 @@ def start_service():
 
     from aidev.web.app import create_app
 
-    config = uvicorn.Config(create_app(), host="127.0.0.1", port=0, log_level="warning")
+    # 测试服务按请求指定状态仓（T1 语义），不得被进程内的 SIGNET_STATE_REPO /
+    # SIGNET_PLATFORM_REPO 绑架（前者是服务端绑定变量，后者仅供 runner 定位被测代码）。
+    saved = {}
+    for name in ("SIGNET_STATE_REPO", "SIGNET_PLATFORM_REPO"):
+        if name in os.environ:
+            saved[name] = os.environ.pop(name)
+    try:
+        application = create_app()
+    finally:
+        os.environ.update(saved)
+    config = uvicorn.Config(application, host="127.0.0.1", port=0, log_level="warning")
     _SERVER = uvicorn.Server(config)
     thread = threading.Thread(target=_SERVER.run, daemon=True, name="aidev-test-service")
     thread.start()
@@ -70,16 +85,88 @@ class WorkflowTestCase(unittest.TestCase):
     def setUp(self):
         self._temporary = tempfile.TemporaryDirectory(prefix="aidev-test-")
         self.root = Path(self._temporary.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self._saved_home = (
+            os.environ.get("HOME"),
+            os.environ.get("USERPROFILE"),
+        )
+        os.environ["HOME"] = str(self.home)
+        os.environ["USERPROFILE"] = str(self.home)
+        self._passwords = {}
+        self._tokens = {}
 
     def tearDown(self):
+        saved_home, saved_profile = self._saved_home
+        if saved_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = saved_home
+        if saved_profile is None:
+            os.environ.pop("USERPROFILE", None)
+        else:
+            os.environ["USERPROFILE"] = saved_profile
         self._temporary.cleanup()
 
     def path(self, *parts):
         return self.root.joinpath(*parts)
 
-    def run_json(self, script, arguments, expected_exit=0):
+    def cli_env(self):
         env = dict(TEST_ENV)
+        env["HOME"] = str(self.home)
+        env["USERPROFILE"] = str(self.home)
         env["SIGNET_BASE_URL"] = start_service()
+        return env
+
+    def requested_actor(self, arguments):
+        args = [str(item) for item in arguments]
+        for flag in ACTOR_FLAGS:
+            if flag in args:
+                index = args.index(flag)
+                if index + 1 < len(args):
+                    return args[index + 1]
+        return None
+
+    def token_for(self, alias):
+        """按 actor 别名维护独立账号：凭据身份 == 请求身份（AC-09 语义下保持多角色测试有效）。"""
+        if not alias or not isinstance(alias, str) or not ACTOR_PATTERN.fullmatch(alias):
+            alias = DEFAULT_TEST_USER
+        if alias in self._tokens:
+            return self._tokens[alias]
+        env = self.cli_env()
+        password = "test-pass-" + secrets.token_hex(8)
+        login = subprocess.run(
+            [sys.executable, str(OPERATOR_CLI), "login", "--user", alias, "--password", password],
+            cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=60, check=False,
+        )
+        if login.returncode != 0:
+            created = subprocess.run(
+                [sys.executable, str(ADMIN_CLI), "create-user", "--user", alias, "--password", password],
+                cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=60, check=False,
+            )
+            if created.returncode != 0:
+                raise AssertionError(f"create-user failed for {alias}: {(created.stdout or created.stderr)[-300:]}")
+            login = subprocess.run(
+                [sys.executable, str(OPERATOR_CLI), "login", "--user", alias, "--password", password],
+                cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=60, check=False,
+            )
+            if login.returncode != 0:
+                raise AssertionError(f"operator login failed for {alias}: {(login.stdout or login.stderr)[-300:]}")
+        document = json.loads((self.home / ".signet" / "client.json").read_text(encoding="utf-8"))
+        token = document["token"]
+        self._tokens[alias] = token
+        self._passwords[alias] = password
+        return token
+
+    def run_json(self, script, arguments, expected_exit=0):
+        token = self.token_for(self.requested_actor(arguments))
+        client_file = self.home / ".signet" / "client.json"
+        client_file.parent.mkdir(parents=True, exist_ok=True)
+        client_file.write_text(json.dumps({"base_url": start_service(), "token": token}) + "\n", encoding="utf-8")
+        env = self.cli_env()
         result = subprocess.run(
             [sys.executable, str(script), *map(str, arguments)],
             cwd=ROOT,
@@ -87,6 +174,7 @@ class WorkflowTestCase(unittest.TestCase):
             capture_output=True,
             text=True,
             encoding="utf-8",
+            errors="replace",
             check=False,
         )
         if result.returncode != expected_exit:
@@ -110,6 +198,7 @@ class WorkflowTestCase(unittest.TestCase):
             capture_output=True,
             text=True,
             encoding="utf-8",
+            errors="replace",
             check=False,
         )
         if result.returncode != expected_exit:

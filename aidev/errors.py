@@ -10,3 +10,10 @@ class PlatformError(Exception):
 class OperationalError(PlatformError):
     def __init__(self, code, message, details=None):
         super().__init__(code, message, exit_code=3, details=details)
+
+
+class AuthorizationError(PlatformError):
+    """身份已认证但不被允许执行该操作（HTTP 403）。"""
+
+    def __init__(self, code, message, details=None):
+        super().__init__(code, message, exit_code=4, details=details)
