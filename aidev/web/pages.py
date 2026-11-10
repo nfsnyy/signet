@@ -160,6 +160,29 @@ def _handbook_tldr():
     )
 
 
+def _dispatch_block(task_id):
+    """派活卡：Draft/Ready（非 In Progress）任务渲染的领取指引块（AC-12）。
+
+    与 Implemented 任务的交接卡形成对称交接面：任务 id、工作区指引、
+    aidev-agent skill 入口与「不 push、不动远端」边界声明，可直接复制给 agent。
+    """
+    task_id = html.escape(str(task_id))
+    return (
+        "<h2>派活卡（agent 领取指引）</h2>"
+        "<p>本任务待领取。operator 在页面或 API 领取（<code>POST /api/tasks/"
+        + task_id
+        + "/claims</code>）即签发 handoff 令牌（sigt），把令牌与工作区目录交给 agent。</p>"
+        "<pre>"
+        "任务 id："
+        + task_id
+        + "\n工作区：operator 提供空目录（init-task --workspace &lt;目录&gt;），agent 经 claim --handoff 落地任务包\n"
+        "agent 入口：装载 aidev-agent skill（skills/aidev-agent/SKILL.md），执行\n"
+        "  python aidev-agent.py claim --handoff &lt;sigt&gt; --workspace &lt;工作区目录&gt;\n"
+        "边界：agent 只改代码完成任务，不 push、不动 git 远端（入库由 operator 负责）"
+        "</pre>"
+    )
+
+
 def _handbook_block(task_id):
     """交接卡（验收操作手册）：仅 Implemented 任务渲染。
 
@@ -226,6 +249,7 @@ def render_task_detail(user, detail):
         card_block = "<h2>验收卡（钉扎）</h2><p>未钉扎（任务尚未 freeze）</p>"
     handbook = _handbook_block(detail.get("task_id")) if detail.get("state") == "Implemented" else ""
     handbook_tldr = _handbook_tldr() if detail.get("state") == "Implemented" else ""
+    dispatch = _dispatch_block(detail.get("task_id")) if detail.get("state") in ("Draft", "Ready") else ""
     body = (
         handbook_tldr
         + "<h1>{}（<code>{}</code>）</h1>".format(
@@ -234,6 +258,7 @@ def render_task_detail(user, detail):
         + meta
         + "<h2>任务说明（task.md 原稿）</h2><pre>{}</pre>".format(html.escape(str(detail.get("body") or "")))
         + card_block
+        + dispatch
         + handbook
         + "<p>当前登录用户：<strong>{}</strong></p>".format(html.escape(user))
         + "<nav><a href=\"/tasks\">返回任务看板</a>　<a href=\"/\">返回概况</a></nav>"

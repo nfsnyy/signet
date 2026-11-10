@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, Form, Header, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, model_validator
 
 from .. import authn, readmodel
@@ -19,10 +19,12 @@ from ..service import (
     block_authoritative,
     claim,
     claim_authoritative,
+    claim_with_sigt,
     enhancement,
     evidence_manifest,
     init_repository,
     init_task,
+    resolve_spec_asset,
     status,
     submit,
     submit_authoritative,
@@ -517,9 +519,9 @@ def create_app(default_repo=None):
     def status_endpoint(request: Request, task_id: str, workspace: str | None = Query(default=None)):
         if workspace:
             workspace_task_id(workspace, task_id)
-            return ok(status(workspace))
+            return ok({**status(workspace), "task_id": task_id})
         metadata = load_authoritative_task(resolve_repo(None), task_id)
-        return ok({"task": metadata, "inbox": [], "outbox_collab": [], "authoritative": True})
+        return ok({"task": metadata, "inbox": [], "outbox_collab": [], "authoritative": True, "task_id": task_id})
 
     @app.get("/api/tasks/{task_id}/events")
     def events_endpoint(
@@ -539,7 +541,19 @@ def create_app(default_repo=None):
         if workspace:
             workspace_task_id(workspace, task_id)
             return ok(claim(workspace, request_actor(request), request_actor(request)))
+        context = credentials(request)
+        if context["kind"] == "sigt":
+            # sigt 幂等接管：同 actor 续期（lease.renewed）/ 无租约重 claim，
+            # 响应携带完整任务包（AC-01/AC-03）。
+            return ok(claim_with_sigt(resolve_repo(None), task_id, context["actor"]))
         return ok(claim_authoritative(resolve_repo(None), task_id, request_actor(request)))
+
+    @app.get("/api/tasks/{task_id}/assets/{name:path}")
+    def task_asset_endpoint(request: Request, task_id: str, name: str):
+        repository = resolve_repo(None)
+        metadata = load_authoritative_task(repository, task_id)
+        asset_path = resolve_spec_asset(repository, metadata, name)
+        return Response(content=asset_path.read_bytes(), media_type="application/octet-stream")
 
     @app.post("/api/tasks/{task_id}/submission")
     def submission_endpoint(

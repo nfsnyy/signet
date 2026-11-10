@@ -49,6 +49,13 @@ operator 面动词（`init-repository/init-task/freeze/refreeze/sync/verify/reje
 - 服务端按凭据身份覆盖请求体中的 `actor` / `on_behalf_of`：事件归因永远等于凭据身份，`--actor` 参数仅保留签名兼容。
 - 凭据纪律：CLI 令牌与 handoff 令牌只在本机、本工作区内使用，绝不外发；`handoff-inspect` 只读本机 secret，不联网。
 
+## 1.2 handoff 令牌会话启动（claim --handoff）
+
+- 从 operator 拿到 sigt 后，入场第一步：`python <平台路径>\aidev-agent.py claim --handoff <sigt> --workspace <工作区目录>`。CLI 先在**本地预检**验签（复算 HMAC，不发任何请求；坏令牌在指向死端口时也会被拒绝），通过后向服务端幂等接管任务，并把完整任务包落地工作区：`task.md`、`AGENTS.md`、`contract/` 三件套与全部资产（逐项校验 sha256）、`.signet-token`、状态仓根 `hints.md`（有则注入）。
+- **工作区自动附带**：含 `.signet-token` 的工作区执行 `status` / `submit` 等动词时，CLI 自动以 sigt 附带（无需 `--handoff`、`--actor`）；`submit` 走服务端直回流，状态立即 Implemented。每轮循环先 `status`；被拒或状态与预期不符时先 `log` 读事件链再决定。
+- **重 claim（幂等续作）**：同 actor 持 sigt 重跑 claim = 接管 + 续期（`lease.renewed` 事件、`expires_at` 顺延 24h）；换 actor 必须先由 operator 释放租约，令牌不会越权接管他人租约。
+- **返场**：reject 后若工作区投影未刷新、提案 stale（`proposal.stale` / `proposal.spec_pin_mismatch`），处置 = 请 operator sync 后重 claim；不得手改 `task.md` 强推。
+
 ## 2. 硬性约束（违反会被拒绝或作废）
 
 1. **不得直接修改** `task.md`、`AGENTS.md`、`contract/` 下任何文件；任务状态只能经提案 + operator sync 变更。
@@ -95,3 +102,29 @@ operator 面动词（`init-repository/init-task/freeze/refreeze/sync/verify/reje
 ```
 
 先读 `AGENTS.md` 与冻结三件套再动手；不确定能否做某事时，优先用 `block` 提出问题而不是猜。
+
+## 6. 自验环境、收尾与反哺纪律
+
+### 6.1 自验环境（完成定义）
+
+- 验收卡 verify_notes 的字面环境就是完成定义，逐条对齐后再宣布做完：`SIGNET_STATE_REPO` = **可弃置克隆**（可弃置的状态仓克隆；编排会真实写入，绝不用开发主仓）、`SIGNET_PLATFORM_REPO` = 平台仓工作副本（runner 仅用它定位被测代码）、`SIGNET_BASE_URL` = 被测服务自引用（机器用例由服务端执行，取服务端进程环境）；服务端进程环境须自带三者，默认端口 8000 须空闲。
+- 双变量分工：STATE 变量绑定服务端（唯一权威账本），PLATFORM 变量只给 runner/CLI 定位代码——写反会静默失效。
+- Git Bash 下环境变量路径必须 `C:/` 形态（`/c/...` 不转换、静默失效）；命令行参数两种形态皆可。
+
+### 6.2 收尾
+
+- 收尾必须关闭自己起的全部服务进程（先按端口定位 PID 再杀，注意别只杀掉包装 shell）、清理编排残留（临时工作区、临时 HOME、编排账号）。
+- 中断或收尾前在工作区写 `handoff.md` 交接摘要：进展 / 下一步 / 环境残留，供接续者（或返场的自己）入场直读。
+
+### 6.3 反哺（双通道，勿混）
+
+- **经验教训**（后辈该怎么干活）→ 写工作区 `hints-proposal.md`（随手记，一条一行），submit 后由 operator 验收时评审合入状态仓 `hints.md`。
+- **改进点**（平台/项目该怎么改）→ 用 `enhancement` 动词登记，进 backlog 容器，operator 分拣。
+- 入场必读：状态仓根 `hints.md`（随任务包注入工作区）是本项目环境级经验的唯一入口；动手前先读。
+
+## 附录 B：真人端到端旅程（交接协议实操）
+
+1. **页面领取**：operator 在任务详情页（Draft/Ready，含派活卡）领取任务，`POST /api/tasks/{id}/claims` 签发 handoff 令牌（sigt）；
+2. **复制令牌**：把 sigt 交给 agent（仅此工作区使用，绝不外发）；
+3. **agent 入场**：装载本 skill → `claim --handoff` 落地任务包 → 干活、按 verify_notes 自验、攒证据；
+4. **submit 回流**：工作区 `submit`（自动附带 sigt，直回流 Implemented）→ operator 验收 verify / close。

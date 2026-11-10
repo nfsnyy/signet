@@ -127,11 +127,13 @@ def encode_multipart(fields, files):
 _REQUEST_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def perform(method, url, fields=None, files=None, role=None, token=None):
+def perform(method, url, fields=None, files=None, role=None, token=None, sigt=None, raw=False):
     headers = {}
     if role:
         headers[ROLE_HEADER] = role
-    if token:
+    if sigt:
+        headers["Authorization"] = "sigt " + sigt
+    elif token:
         headers["Authorization"] = "Bearer " + token
     if files is not None:
         body, content_type = encode_multipart(fields or {}, files)
@@ -144,9 +146,11 @@ def perform(method, url, fields=None, files=None, role=None, token=None):
     request = urllib.request.Request(url, data=body, method=method, headers=headers)
     try:
         with _REQUEST_OPENER.open(request, timeout=REQUEST_TIMEOUT) as response:
-            return response.status, decode_json(response.read())
+            content = response.read()
+            return (response.status, content) if raw else (response.status, decode_json(content))
     except urllib.error.HTTPError as error:
-        return error.code, decode_json(error.read())
+        content = error.read()
+        return (error.code, content) if raw else (error.code, decode_json(content))
     except urllib.error.URLError as error:
         raise ServiceUnavailable(url, error.reason) from error
 
@@ -222,37 +226,49 @@ def contract_assets(contract_path):
     return relative_paths, files
 
 
-def build_request(role, arguments):
+def build_request(role, arguments, sigt_payload=None):
+    """组请求；sigt_payload 非空表示工作区自动附带模式（任务取自令牌，免 workspace 字段）。"""
+
+    def task_id():
+        if sigt_payload:
+            return sigt_payload["task"]
+        return resolve_task_id(arguments.workspace)
+
     command = arguments.command
     if command == "health":
         return "GET", "/api/health", None, None
     if command == "login":
         return "POST", "/api/login", {"user": arguments.user, "password": arguments.password}, None
     if command == "log":
+        if sigt_payload:
+            return "GET", f"/api/tasks/{task_id()}/events", None, None
         query = urllib.parse.urlencode({"repo": arguments.repo})
         return "GET", f"/api/tasks/{arguments.task_id}/events?{query}", None, None
     if command == "status":
-        task_id = resolve_task_id(arguments.workspace)
+        if sigt_payload:
+            return "GET", f"/api/tasks/{task_id()}/status", None, None
         query = urllib.parse.urlencode({"workspace": arguments.workspace})
-        return "GET", f"/api/tasks/{task_id}/status?{query}", None, None
+        return "GET", f"/api/tasks/{task_id()}/status?{query}", None, None
     if command == "claim":
+        if sigt_payload:
+            return "POST", f"/api/tasks/{task_id()}/claims", {}, None
         fields = present({"workspace": arguments.workspace, "actor": arguments.actor, "on_behalf_of": arguments.on_behalf_of})
-        return "POST", f"/api/tasks/{resolve_task_id(arguments.workspace)}/claims", fields, None
+        return "POST", f"/api/tasks/{task_id()}/claims", fields, None
     if command == "submit":
-        fields = present({"workspace": arguments.workspace, "actor": arguments.actor, "on_behalf_of": arguments.on_behalf_of})
+        fields = {} if sigt_payload else present({"workspace": arguments.workspace, "actor": arguments.actor, "on_behalf_of": arguments.on_behalf_of})
         files = [("report", *read_upload(arguments.report, "internal.error", missing_exit=4))]
         files.extend(("evidence", *read_upload(path, "submit.evidence_missing")) for path in arguments.evidence)
-        return "POST", f"/api/tasks/{resolve_task_id(arguments.workspace)}/submission", fields, files
+        return "POST", f"/api/tasks/{task_id()}/submission", fields, files
     if command == "block":
         fields = present({"workspace": arguments.workspace, "actor": arguments.actor, "on_behalf_of": arguments.on_behalf_of, "reason": arguments.reason})
         files = [("evidence", *read_upload(path, "submit.evidence_missing")) for path in arguments.evidence]
-        return "POST", f"/api/tasks/{resolve_task_id(arguments.workspace)}/blocks", fields, files
+        return "POST", f"/api/tasks/{task_id()}/blocks", fields, files
     if command == "enhancement":
         fields = present({"workspace": arguments.workspace, "actor": arguments.actor, "on_behalf_of": arguments.on_behalf_of, "title": arguments.title, "details": arguments.details})
-        return "POST", f"/api/tasks/{resolve_task_id(arguments.workspace)}/enhancements", fields, None
+        return "POST", f"/api/tasks/{task_id()}/enhancements", fields, None
     if command == "collab-send":
         fields = present({"workspace": arguments.workspace, "actor": arguments.actor, "on_behalf_of": arguments.on_behalf_of, "type": arguments.type, "to_task": arguments.to_task, "summary": arguments.summary, "details": arguments.details})
-        return "POST", f"/api/tasks/{resolve_task_id(arguments.workspace)}/collaborations", fields, None
+        return "POST", f"/api/tasks/{task_id()}/collaborations", fields, None
     if command == "collab-answer":
         fields = present({"workspace": arguments.workspace, "actor": arguments.actor, "on_behalf_of": arguments.on_behalf_of, "action": arguments.action, "note": arguments.note})
         return "POST", f"/api/collaborations/{arguments.message_id}/answers", fields, None
@@ -341,12 +357,40 @@ def build_request(role, arguments):
     raise ClientInputError("operation.unsupported", f"unsupported command: {command}")
 
 
-def inspect_handoff(token):
+def verify_sigt_local(token):
     """纯本地解析并验签 handoff 能力令牌（sigt），不联网。
 
     读取本机 ~/.signet/server-secret 复算 HMAC-SHA256 签名（取前 32 个
-    hex 字符）并与令牌签名段比对；输出 v/task/actor/repo 与 valid 字段。
+    hex 字符）并与令牌签名段比对；返回 (payload, error_code, message)。
     """
+    if not isinstance(token, str) or not token.startswith("sigt-"):
+        return None, "sigt.invalid", "handoff 令牌（sigt）格式不合法：不是 sigt- 前缀"
+    rest = token[len("sigt-"):]
+    if "-" not in rest:
+        return None, "sigt.invalid", "handoff 令牌（sigt）格式不合法：缺少签名段"
+    segment, signature = rest.rsplit("-", 1)
+    try:
+        padded = segment + "=" * (-len(segment) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        payload = None
+    if not isinstance(payload, dict):
+        return None, "sigt.invalid", "handoff 令牌（sigt）负载不是合法 JSON"
+    if not isinstance(payload.get("task"), str) or not payload["task"]:
+        return None, "sigt.invalid", "handoff 令牌（sigt）负载缺少 task"
+    secret_path = user_home() / ".signet" / SECRET_FILE
+    try:
+        secret = secret_path.read_bytes()
+    except OSError:
+        return None, "auth.secret_missing", f"无法本地验签：本机缺少服务端密钥 {secret_path}"
+    expected = hmac.new(secret, segment.encode("ascii"), hashlib.sha256).hexdigest()[:32]
+    if not hmac.compare_digest(expected, signature):
+        return None, "sigt.signature_invalid", "handoff 令牌（sigt）验签失败：令牌损坏或不属于本平台"
+    return payload, None, None
+
+
+def inspect_handoff(token):
+    """纯本地解析并验签 handoff 能力令牌（sigt），输出 v/task/actor/repo 与 valid。"""
     if not isinstance(token, str) or not token.startswith("sigt-"):
         return emit_error("sigt.invalid", "token is not a well-formed sigt", {}, 2)
     rest = token[len("sigt-"):]
@@ -375,6 +419,107 @@ def inspect_handoff(token):
         "valid": valid,
     }
     print(json.dumps({"ok": True, "result": result}, ensure_ascii=True, sort_keys=True))
+    return 0
+
+
+WORKSPACE_TOKEN_FILE = ".signet-token"
+WORKSPACE_DIRECTORIES = ("contract", "evidence", "inbox", "outbox", "outbox-collab")
+
+
+def workspace_handoff_token(workspace):
+    """工作区 .signet-token 存在时返回令牌文本（strip），否则 None。"""
+    if not workspace:
+        return None
+    path = Path(workspace) / WORKSPACE_TOKEN_FILE
+    if not path.is_file():
+        return None
+    try:
+        token = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return token if token.startswith("sigt-") else None
+
+
+def emit_unreachable(error):
+    print(f"错误：无法连接 signet 平台服务（{error.base_url}）：{error.reason}", file=sys.stderr)
+    print("请先启动服务（例如：python -m aidev.web.server，默认监听 127.0.0.1:8000），", file=sys.stderr)
+    print("或通过环境变量 SIGNET_BASE_URL 或 ~/.signet/client.json 指定已启动的服务地址。", file=sys.stderr)
+    return 3
+
+
+def _safe_workspace_file(workspace, name):
+    relative = Path(name)
+    if relative.is_absolute() or ".." in relative.parts or not str(name).strip():
+        raise ClientInputError("package.invalid_file", f"任务包文件路径不合法: {name}")
+    return Path(workspace) / relative
+
+
+def land_handoff_workspace(workspace, token, package):
+    """把 claim --handoff 任务包落地工作区（task.md、工作区附带文件、contract/ 资产、.signet-token）。"""
+    workspace = Path(workspace)
+    if workspace.exists() and not workspace.is_dir():
+        raise ClientInputError("workspace.not_directory", f"工作区路径不是目录: {workspace}")
+    workspace.mkdir(parents=True, exist_ok=True)
+    for directory in WORKSPACE_DIRECTORIES:
+        (workspace / directory).mkdir(exist_ok=True)
+    metadata = package.get("metadata")
+    body = package.get("task_md")
+    if not isinstance(metadata, dict) or not isinstance(body, str):
+        raise ClientInputError("package.invalid", "服务端响应缺少任务包 metadata/task_md，已中止落地")
+    header = json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False)
+    (workspace / "task.md").write_text(f"---\n{header}\n---\n{body}", encoding="utf-8", newline="\n")
+    for name, content in (package.get("workspace_files") or {}).items():
+        target = _safe_workspace_file(workspace, name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8", newline="\n")
+    base_url = resolve_base_url()
+    task_id = metadata["task_id"]
+    for asset in package.get("assets") or []:
+        name = asset.get("name")
+        expected = asset.get("sha256")
+        if not name or not expected:
+            raise ClientInputError("package.invalid", "任务包资产清单条目缺少 name/sha256")
+        try:
+            status, content = perform(
+                "GET",
+                f"{base_url}/api/tasks/{task_id}/assets/{urllib.parse.quote(name)}",
+                sigt=token,
+                raw=True,
+            )
+        except ServiceUnavailable as error:
+            raise ClientInputError("service.unreachable", f"资产下载时无法连接服务: {error.base_url}", exit_code=3) from error
+        if status != 200:
+            raise ClientInputError("asset.download_failed", f"资产下载失败（HTTP {status}）: {name}", exit_code=4)
+        if hashlib.sha256(content).hexdigest() != expected:
+            raise ClientInputError("asset.hash_mismatch", f"资产 sha256 与清单不一致: {name}", exit_code=4)
+        target = _safe_workspace_file(workspace / "contract", name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+    token_path = workspace / WORKSPACE_TOKEN_FILE
+    token_path.write_text(token + "\n", encoding="utf-8", newline="\n")
+
+
+def handoff_claim(arguments):
+    """claim --handoff：本地预检验签（零网络）→ sigt 幂等接管 → 任务包落地工作区。"""
+    payload, code, message = verify_sigt_local(arguments.handoff)
+    if code:
+        return emit_error(code, message, {}, 2)
+    task_id = payload["task"]
+    base_url = resolve_base_url()
+    try:
+        status, response = perform("POST", f"{base_url}/api/tasks/{task_id}/claims", fields={}, sigt=arguments.handoff)
+    except ServiceUnavailable as error:
+        return emit_unreachable(error)
+    if not (isinstance(response, dict) and response.get("ok")):
+        error = response.get("error") if isinstance(response, dict) else None
+        if isinstance(error, dict) and isinstance(error.get("code"), str):
+            return emit_error(error["code"], error.get("message") or "", error.get("details") or {}, HTTP_EXIT_CODES.get(status, 4))
+        return emit_error("request.invalid", json.dumps(response, ensure_ascii=True)[:500], {}, 2 if status in (400, 409) else 4)
+    try:
+        land_handoff_workspace(arguments.workspace, arguments.handoff, response.get("result", {}).get("package") or {})
+    except ClientInputError as error:
+        return emit_error(error.code, error.message, error.details, error.exit_code)
+    print(json.dumps(response, ensure_ascii=True, sort_keys=True))
     return 0
 
 
@@ -485,41 +630,43 @@ def parser_for(role):
         inspect_parser = subparsers.add_parser("handoff-inspect")
         inspect_parser.add_argument("token")
         claim_parser = subparsers.add_parser("claim")
+        claim_parser.add_argument("--handoff", metavar="SIGT",
+                                  help="handoff 令牌会话启动：本地预检验签后幂等接管并落地任务包")
         claim_parser.add_argument("--workspace", required=True)
-        claim_parser.add_argument("--actor", required=True)
-        claim_parser.add_argument("--on-behalf-of", required=True)
+        claim_parser.add_argument("--actor")
+        claim_parser.add_argument("--on-behalf-of")
         submit_parser = subparsers.add_parser("submit")
         submit_parser.add_argument("--workspace", required=True)
-        submit_parser.add_argument("--actor", required=True)
-        submit_parser.add_argument("--on-behalf-of", required=True)
+        submit_parser.add_argument("--actor")
+        submit_parser.add_argument("--on-behalf-of")
         submit_parser.add_argument("--report", required=True)
         submit_parser.add_argument("--evidence", action="append", required=True)
         block_parser = subparsers.add_parser("block")
         block_parser.add_argument("--workspace", required=True)
-        block_parser.add_argument("--actor", required=True)
-        block_parser.add_argument("--on-behalf-of", required=True)
+        block_parser.add_argument("--actor")
+        block_parser.add_argument("--on-behalf-of")
         block_parser.add_argument("--reason", required=True)
         block_parser.add_argument("--evidence", action="append", required=True)
         enhancement_parser = subparsers.add_parser("enhancement")
         enhancement_parser.add_argument("--workspace", required=True)
-        enhancement_parser.add_argument("--actor", required=True)
-        enhancement_parser.add_argument("--on-behalf-of", required=True)
+        enhancement_parser.add_argument("--actor")
+        enhancement_parser.add_argument("--on-behalf-of")
         enhancement_parser.add_argument("--title", required=True)
         enhancement_parser.add_argument("--details", required=True)
         status_parser = subparsers.add_parser("status")
         status_parser.add_argument("--workspace", required=True)
         collab_send_parser = subparsers.add_parser("collab-send")
         collab_send_parser.add_argument("--workspace", required=True)
-        collab_send_parser.add_argument("--actor", required=True)
-        collab_send_parser.add_argument("--on-behalf-of", required=True)
+        collab_send_parser.add_argument("--actor")
+        collab_send_parser.add_argument("--on-behalf-of")
         collab_send_parser.add_argument("--type", choices=["in-spec-request", "definition-doubt", "new-scope"], required=True)
         collab_send_parser.add_argument("--to-task", required=True)
         collab_send_parser.add_argument("--summary", required=True)
         collab_send_parser.add_argument("--details", required=True)
         collab_answer_parser = subparsers.add_parser("collab-answer")
         collab_answer_parser.add_argument("--workspace", required=True)
-        collab_answer_parser.add_argument("--actor", required=True)
-        collab_answer_parser.add_argument("--on-behalf-of", required=True)
+        collab_answer_parser.add_argument("--actor")
+        collab_answer_parser.add_argument("--on-behalf-of")
         collab_answer_parser.add_argument("--message-id", required=True)
         collab_answer_parser.add_argument("--action", choices=["accept", "reject", "counter", "escalate", "close"], required=True)
         collab_answer_parser.add_argument("--note")
@@ -546,19 +693,28 @@ def run(role, argv=None):
     arguments = parser.parse_args(argv)
     if arguments.command == "handoff-inspect":
         return inspect_handoff(arguments.token)
+    if role == "agent" and arguments.command == "claim" and getattr(arguments, "handoff", None):
+        return handoff_claim(arguments)
+    sigt = None
+    sigt_payload = None
+    if role == "agent":
+        workspace = getattr(arguments, "workspace", None)
+        token = workspace_handoff_token(workspace) if workspace else None
+        if token:
+            sigt = token
+            sigt_payload, code, message = verify_sigt_local(token)
+            if code:
+                return emit_error(code, message + "（工作区 .signet-token 验签失败）", {}, 2)
     try:
-        method, path, fields, files = build_request(role, arguments)
+        method, path, fields, files = build_request(role, arguments, sigt_payload)
     except ClientInputError as error:
         return emit_error(error.code, error.message, error.details, error.exit_code)
     base_url = resolve_base_url()
-    token = None if arguments.command == "login" else resolve_token()
+    token = None if arguments.command == "login" or sigt else resolve_token()
     try:
-        status, payload = perform(method, base_url + path, fields=fields, files=files, role=role, token=token)
+        status, payload = perform(method, base_url + path, fields=fields, files=files, role=role, token=token, sigt=sigt)
     except ServiceUnavailable as error:
-        print(f"错误：无法连接 signet 平台服务（{base_url}）：{error.reason}", file=sys.stderr)
-        print("请先启动服务（例如：python -m aidev.web.server，默认监听 127.0.0.1:8000），", file=sys.stderr)
-        print("或通过环境变量 SIGNET_BASE_URL 或 ~/.signet/client.json 指定已启动的服务地址。", file=sys.stderr)
-        return 3
+        return emit_unreachable(error)
     if arguments.command == "login" and status == 200 and isinstance(payload, dict) and payload.get("ok"):
         result = payload.get("result") or {}
         store_client_config(base_url, result.get("token"), result.get("user"))

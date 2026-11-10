@@ -1,10 +1,11 @@
 import json
 import os
 import shutil
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .authn import mint_sigt
-from .collaboration import process_collaboration_sync, validate_report_collaboration
+from .collaboration import collaboration_overview, process_collaboration_sync, validate_report_collaboration
 from .domain import (
     REPORT_SECTIONS,
     SPEC_FILES,
@@ -26,7 +27,8 @@ from .domain import (
     validate_report,
     workspace_agents,
 )
-from .errors import OperationalError, PlatformError
+from .errors import NotFoundError, OperationalError, PlatformError
+from .readmodel import parse_requirement_text, pinned_acceptance_card
 from .gitrepo import commit_paths, ensure_remote_syncable, ensure_repository, initialize_repository
 from .jsonio import append_jsonl, new_id, read_json, read_jsonl, sha256_file, utc_now, write_json
 from .taskfile import read_task, write_task
@@ -178,6 +180,9 @@ def init_task(repository, workspace, title, requirement, owner, actor):
         (workspace / directory).mkdir(exist_ok=True)
     write_task(workspace / "task.md", metadata, body)
     (workspace / "AGENTS.md").write_text(workspace_agents(metadata), encoding="utf-8", newline="\n")
+    hints_source = Path(repository) / "hints.md"
+    if hints_source.is_file():
+        shutil.copyfile(hints_source, workspace / "hints.md")
     return {"task_id": task_id, "spec_id": spec_id, "state": "Draft", "commit": commit}
 
 
@@ -527,6 +532,179 @@ def claim_authoritative(repository, task_id, actor):
         "state": metadata["state"],
         "lease": metadata["lease"],
         "handoff_token": mint_sigt(task_id, actor, str(repository)),
+        "authoritative": True,
+        "commit": commit,
+    }
+
+
+def requirement_body(repository, requirement_id):
+    """requirements/{id}/requirement.md 去 frontmatter 后的原文；无此需求返回 None。"""
+    if not requirement_id:
+        return None
+    file_path = Path(repository) / "requirements" / requirement_id / "requirement.md"
+    if not file_path.is_file():
+        return None
+    try:
+        text = file_path.read_text(encoding="utf-8")
+        _fields, body = parse_requirement_text(text)
+    except (OSError, ValueError):
+        return None
+    return body
+
+
+def spec_version_directory(repository, metadata):
+    pin = metadata.get("spec_pin")
+    if not isinstance(pin, dict) or not metadata.get("spec_id"):
+        return None
+    return Path(repository) / "specs" / metadata["spec_id"] / pin["acceptance_card"]["version"]
+
+
+def spec_asset_manifest(repository, metadata):
+    """钉扎规格版本目录内全部文件的下载清单（name=相对 POSIX 路径, sha256）。"""
+    spec_directory = spec_version_directory(repository, metadata)
+    if spec_directory is None or not spec_directory.is_dir():
+        return []
+    manifest = []
+    for path in sorted(spec_directory.rglob("*")):
+        if path.is_file():
+            manifest.append({
+                "name": path.relative_to(spec_directory).as_posix(),
+                "sha256": sha256_file(path),
+            })
+    return manifest
+
+
+def resolve_spec_asset(repository, metadata, name):
+    """按名定位钉扎规格目录内的资产文件（拒绝目录穿越），不存在时 404。"""
+    spec_directory = spec_version_directory(repository, metadata)
+    relative = Path(name or "")
+    if spec_directory is None:
+        raise NotFoundError("task.asset_not_found", f"task has no frozen spec assets: {name}")
+    if relative.is_absolute() or ".." in relative.parts or not str(name).strip():
+        raise PlatformError("task.asset_invalid", f"invalid asset name: {name}")
+    root = spec_directory.resolve()
+    path = (root / relative).resolve()
+    if path != root and root not in path.parents:
+        raise PlatformError("task.asset_invalid", f"asset escapes the spec directory: {name}")
+    if not path.is_file():
+        raise NotFoundError("task.asset_not_found", f"asset does not exist: {name}")
+    return path
+
+
+def task_inbox(repository, task_id):
+    """发给本任务的协作消息（package.inbox；无协作面时为空列表）。"""
+    try:
+        messages = collaboration_overview(repository, task_id).get("messages") or []
+    except (OSError, PlatformError):
+        return []
+    return [message for message in messages if message.get("to_task") == task_id]
+
+
+def build_task_package(repository, metadata, body):
+    """sigt 接管响应携带的完整任务包（AC-01）。
+
+    workspace_files 由 CLI 原样落进工作区根：AGENTS.md 恒有；状态仓根存在
+    hints.md 时一并注入（不存在则不注入、不报错——防御语义）。
+    """
+    repository = Path(repository)
+    workspace_files = {"AGENTS.md": workspace_agents(metadata)}
+    hints_source = repository / "hints.md"
+    if hints_source.is_file():
+        try:
+            workspace_files["hints.md"] = hints_source.read_text(encoding="utf-8")
+        except OSError:
+            pass
+    return {
+        "task_id": metadata["task_id"],
+        "title": metadata.get("title"),
+        "state": metadata.get("state"),
+        "metadata": metadata,
+        "task_md": body,
+        "acceptance_card": pinned_acceptance_card(repository, metadata),
+        "requirement_body": requirement_body(repository, metadata.get("requirement")),
+        "assets": spec_asset_manifest(repository, metadata),
+        "inbox": task_inbox(repository, metadata["task_id"]),
+        "lease_expires_at": (metadata.get("lease") or {}).get("expires_at"),
+        "workspace_files": workspace_files,
+    }
+
+
+def claim_with_sigt(repository, task_id, actor):
+    """sigt 幂等接管 + 续期：直接改写权威账本并提交，响应携带完整任务包。
+
+    - In Progress 且本人持活跃租约：续期（lease.renewed 事件，expires_at 顺延 24h）；
+    - Ready（含 refreeze 释放租约后）或 In Progress 但租约已失效：重 claim
+      （task.claimed 事件，状态进入 In Progress）；
+    - 他人持活跃租约：拒绝（claim.lease_active）。
+    """
+    repository = ensure_repository(repository)
+    path = task_path(repository, task_id)
+    if not path.is_file():
+        raise PlatformError("task.not_found", f"task does not exist: {task_id}")
+    metadata, body = read_task(path)
+    state = metadata.get("state")
+    lease = metadata.get("lease") or {}
+    now = datetime.now(timezone.utc)
+    events = []
+    if state == "In Progress" and lease_is_active(lease):
+        if lease.get("claimed_by") != actor:
+            raise PlatformError("claim.lease_active", "task already has an active lease held by another actor")
+        previous_expiry = lease.get("expires_at")
+        lease["expires_at"] = (now + timedelta(hours=24)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        metadata["lease"] = lease
+        metadata["updated_at"] = utc_now()
+        events.append(make_event(
+            "lease.renewed",
+            task_id,
+            actor,
+            actor,
+            "In Progress",
+            "In Progress",
+            payload={"lease": lease, "previous_expires_at": previous_expiry},
+            entrypoint="agent",
+        ))
+    elif state in ("Ready", "In Progress"):
+        if lease_is_active(lease) and lease.get("claimed_by") != actor:
+            raise PlatformError("claim.lease_active", "task already has an active lease held by another actor")
+        before = state
+        metadata["lease"] = {
+            "claimed_by": actor,
+            "claimed_at": now.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "expires_at": (now + timedelta(hours=24)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "proposal_id": None,
+        }
+        metadata["state"] = "In Progress"
+        metadata["updated_at"] = utc_now()
+        events.append(make_event(
+            "task.claimed",
+            task_id,
+            actor,
+            actor,
+            before,
+            "In Progress",
+            payload={"lease": metadata["lease"]},
+            entrypoint="agent",
+        ))
+    else:
+        raise PlatformError(
+            "claim.not_ready",
+            "only a Ready or In Progress task can be re-claimed with a handoff token",
+            details={"state": state},
+        )
+    write_task(path, metadata, body)
+    events_file = event_path(repository)
+    append_jsonl(events_file, stamp_events(repository, events))
+    commit = commit_paths(
+        repository,
+        [path.relative_to(repository), events_file.relative_to(repository)],
+        f"Reclaim {task_id}",
+    )
+    return {
+        "task_id": task_id,
+        "state": metadata["state"],
+        "lease": metadata["lease"],
+        "lease_expires_at": metadata["lease"]["expires_at"],
+        "package": build_task_package(repository, metadata, body),
         "authoritative": True,
         "commit": commit,
     }

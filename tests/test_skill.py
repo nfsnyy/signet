@@ -127,6 +127,10 @@ class SkillDriftTests(unittest.TestCase):
         for directory in domain.WORKSPACE_DIRECTORIES:
             self.assertIn(directory, self.body)
 
+    def test_handoff_flow_documented(self):
+        for token in ("--handoff", ".signet-token", "lease.renewed"):
+            self.assertIn(token, self.body)
+
 
 if __name__ == "__main__":
     unittest.main()
