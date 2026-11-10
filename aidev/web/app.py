@@ -11,7 +11,8 @@ from pydantic import BaseModel, model_validator
 from .. import authn, readmodel
 from ..collaboration import collab_answer, collab_send, collaboration_overview
 from ..domain import lease_is_active, task_path, validate_actor_alias
-from ..errors import PlatformError
+from ..errors import AuthorizationError, NotFoundError, PlatformError
+from ..jsonio import new_id
 from ..lifecycle import adjudicate_task, close_task, reject_task, verify_task, void_task
 from ..service import (
     block,
@@ -24,6 +25,7 @@ from ..service import (
     init_task,
     status,
     submit,
+    submit_authoritative,
     synchronize,
     task_log,
 )
@@ -142,10 +144,10 @@ class RepositoryBody(ActorValidatingModel):
 
 class InitTaskBody(ActorValidatingModel):
     repo: str | None = None
-    workspace: str
+    workspace: str | None = None
     title: str
     requirement: str
-    owner: str
+    owner: str | None = None
     actor: str | None = None
 
 
@@ -331,6 +333,8 @@ def create_app(default_repo=None):
             status_code = 429
         elif exc.exit_code == 6:
             status_code = 401
+        elif exc.exit_code == 7:
+            status_code = 404
         else:
             status_code = 400
         return JSONResponse(status_code=status_code, content=error_payload(exc.code, exc.message, exc.details))
@@ -429,6 +433,45 @@ def create_app(default_repo=None):
             raise PlatformError("requirement.not_found", f"requirement does not exist: {requirement_id}")
         return HTMLResponse(pages.render_requirement_detail(session["user"], detail))
 
+    @app.get("/tasks")
+    def tasks_board_page(request: Request):
+        session = page_session(request)
+        if session is None:
+            return RedirectResponse(url="/login", status_code=302)
+        return HTMLResponse(pages.render_board(session["user"], readmodel.task_board(resolve_repo(None))))
+
+    @app.get("/tasks/new")
+    def task_new_page(request: Request, requirement: str | None = None):
+        session = page_session(request)
+        if session is None:
+            return RedirectResponse(url="/login", status_code=302)
+        return HTMLResponse(pages.render_task_form(session["user"], requirement))
+
+    @app.post("/tasks")
+    async def task_create_page(request: Request):
+        session = page_session(request)
+        if session is None:
+            return RedirectResponse(url="/login", status_code=302)
+        form = await request.form()
+        title = str(form.get("title") or "").strip()
+        requirement = str(form.get("requirement") or "").strip()
+        if not title or not requirement:
+            raise PlatformError("request.invalid", "title and requirement are required and must be non-empty")
+        # 与 POST /api/tasks 同一条创建路径：owner 锁定为登录用户，workspace 平台生成。
+        workspace = str(Path(tempfile.gettempdir()) / new_id("signet-ws"))
+        result = init_task(resolve_repo(None), workspace, title, requirement, session["user"], session["user"])
+        return RedirectResponse(url="/tasks/{}".format(result["task_id"]), status_code=303)
+
+    @app.get("/tasks/{task_id}")
+    def task_detail_page(request: Request, task_id: str):
+        session = page_session(request)
+        if session is None:
+            return RedirectResponse(url="/login", status_code=302)
+        detail = readmodel.task_detail(resolve_repo(None), task_id)
+        if detail is None:
+            raise NotFoundError("task.not_found", f"task does not exist: {task_id}")
+        return HTMLResponse(pages.render_task_detail(session["user"], detail))
+
     @app.get("/login")
     def login_page(request: Request):
         accept = request.headers.get("Accept", "").lower()
@@ -458,6 +501,17 @@ def create_app(default_repo=None):
         response = RedirectResponse(url="/", status_code=303)
         response.set_cookie(authn.SESSION_COOKIE, token, httponly=True, samesite="lax", path="/")
         return response
+
+    @app.get("/api/tasks")
+    def task_board_endpoint(request: Request):
+        return ok({"tasks": readmodel.task_board(resolve_repo(None))})
+
+    @app.get("/api/tasks/{task_id}")
+    def task_detail_endpoint(request: Request, task_id: str):
+        detail = readmodel.task_detail(resolve_repo(None), task_id)
+        if detail is None:
+            raise NotFoundError("task.not_found", f"task does not exist: {task_id}")
+        return ok(detail)
 
     @app.get("/api/tasks/{task_id}/status")
     def status_endpoint(request: Request, task_id: str, workspace: str | None = Query(default=None)):
@@ -491,19 +545,30 @@ def create_app(default_repo=None):
     def submission_endpoint(
         request: Request,
         task_id: str,
-        workspace: str = Form(...),
-        actor: str = Form(...),
-        on_behalf_of: str = Form(...),
+        workspace: str | None = Form(None),
+        actor: str | None = Form(None),
+        on_behalf_of: str | None = Form(None),
         report: UploadFile = File(...),
-        evidence: list[UploadFile] = File(...),
+        evidence: list[UploadFile] = File(default=[]),
     ):
         context = credentials(request)
-        require_workspace_lease(workspace, task_id, context["actor"])
         check_actor_aliases({"actor": actor, "on_behalf_of": on_behalf_of})
         with tempfile.TemporaryDirectory(prefix="aidev-web-submit-") as temporary:
             report_path = save_upload(report, temporary, "report.json")
             evidence_paths = [save_upload(item, temporary, "evidence") for item in evidence]
-            return ok(submit(workspace, context["actor"], context["actor"], report_path, evidence_paths))
+            if workspace:
+                require_workspace_lease(workspace, task_id, context["actor"])
+                return ok(submit(workspace, context["actor"], context["actor"], report_path, evidence_paths))
+            # 无工作区的编排直通：凭据必须是绑定到本任务的 sigt（中间件已做任务匹配），
+            # 与 claim_authoritative 对称直接改写权威账本。
+            if context["kind"] != "sigt":
+                raise AuthorizationError(
+                    "authz.sigt_required",
+                    "submission without a workspace requires a task capability token (sigt)",
+                )
+            if not evidence_paths:
+                evidence_paths = [report_path]
+            return ok(submit_authoritative(resolve_repo(None), task_id, context["actor"], report_path, evidence_paths))
 
     @app.post("/api/tasks/{task_id}/blocks")
     async def blocks_endpoint(request: Request, task_id: str):
@@ -564,7 +629,15 @@ def create_app(default_repo=None):
 
     @app.post("/api/tasks")
     def init_task_endpoint(request: Request, body: InitTaskBody):
-        return ok(init_task(resolve_repo(body.repo), body.workspace, body.title, body.requirement, body.owner, request_actor(request)))
+        title = (body.title or "").strip()
+        requirement = (body.requirement or "").strip()
+        if not title or not requirement:
+            raise PlatformError("request.invalid", "title and requirement are required and must be non-empty")
+        # 身份锁定（T2 AC-09 语义）：owner 与事件归因均以凭据身份为准，请求体所填 owner 被会话覆盖。
+        actor = request_actor(request)
+        # 页面建任务：workspace 由服务端生成标识；显式传入（CLI/编排）时原样使用。
+        workspace = (body.workspace or "").strip() or str(Path(tempfile.gettempdir()) / new_id("signet-ws"))
+        return ok(init_task(resolve_repo(body.repo), workspace, title, requirement, actor, actor))
 
     @app.post("/api/tasks/{task_id}/freeze")
     def freeze_endpoint(

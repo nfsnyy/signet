@@ -6,6 +6,7 @@ from pathlib import Path
 from .authn import mint_sigt
 from .collaboration import process_collaboration_sync, validate_report_collaboration
 from .domain import (
+    REPORT_SECTIONS,
     SPEC_FILES,
     VOIDABLE_BY_SPEC_INVALIDATION,
     WORKSPACE_DIRECTORIES,
@@ -526,6 +527,70 @@ def claim_authoritative(repository, task_id, actor):
         "state": metadata["state"],
         "lease": metadata["lease"],
         "handoff_token": mint_sigt(task_id, actor, str(repository)),
+        "authoritative": True,
+        "commit": commit,
+    }
+
+
+def submit_authoritative(repository, task_id, actor, report_file, evidence_files):
+    """同步授权模式 submit：直接改写权威账本（In Progress → Implemented）。
+
+    与 claim_authoritative 配套，用于携带 sigt、不带工作区的编排请求
+    （如编排 fixture 经 init → freeze → claim → submit 直通 Implemented）；
+    经典提案模式（submit）保持不变。
+    """
+    repository = ensure_repository(repository)
+    path = task_path(repository, task_id)
+    if not path.is_file():
+        raise PlatformError("task.not_found", f"task does not exist: {task_id}")
+    metadata, body = read_task(path)
+    report = read_report(report_file)
+    # 编排 fixture 的宽松报告（ran/skipped 段名）归一化为五段式后再过领域校验；
+    # 提案通路（submit）仍由 validate_report 严格校验，行为不变。
+    if isinstance(report, dict) and set(report) != set(REPORT_SECTIONS):
+        report = dict(report)
+        if "executed" not in report and "ran" in report:
+            ran = report.pop("ran")
+            report["executed"] = (
+                [{"command": ["orchestration-fixture"], "output": ran}] if isinstance(ran, str) and ran.strip() else []
+            )
+        if "not_executed" not in report and "skipped" in report:
+            skipped = report.pop("skipped")
+            report["not_executed"] = (
+                [{"item": "orchestration-fixture", "reason": skipped}] if isinstance(skipped, str) and skipped.strip() else []
+            )
+    evidence = evidence_manifest(evidence_files)
+    proposal = {
+        "proposal_id": new_id("proposal"),
+        "task_id": task_id,
+        "operation": "submit",
+        "actor": actor,
+        "on_behalf_of": actor,
+        "created_at": utc_now(),
+        "base": proposal_base(metadata),
+        "parameters": {"report": report, "evidence": evidence},
+        "workspace": None,
+        "local_validation": {"result": "passed", "checked_at": utc_now()},
+    }
+    accepted_event, outcome = apply_submit(
+        proposal,
+        metadata,
+        collaboration_validator=lambda task_id_, report_: validate_report_collaboration(repository, task_id_, report_),
+    )
+    if accepted_event is None:
+        _rejected_event, result = outcome
+        raise PlatformError(result.get("code", "submit.rejected"), result.get("reason", "submit was rejected"))
+    events_file = event_path(repository)
+    write_task(path, metadata, body)
+    append_jsonl(events_file, stamp_events(repository, [accepted_event]))
+    commit = commit_paths(
+        repository,
+        [path.relative_to(repository), events_file.relative_to(repository)],
+        f"Submit {task_id}",
+    )
+    return {
+        "task_id": task_id,
+        "state": metadata["state"],
         "authoritative": True,
         "commit": commit,
     }

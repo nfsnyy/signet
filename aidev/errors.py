@@ -17,3 +17,10 @@ class AuthorizationError(PlatformError):
 
     def __init__(self, code, message, details=None):
         super().__init__(code, message, exit_code=4, details=details)
+
+
+class NotFoundError(PlatformError):
+    """目标资源不存在（HTTP 404）。"""
+
+    def __init__(self, code, message, details=None):
+        super().__init__(code, message, exit_code=7, details=details)

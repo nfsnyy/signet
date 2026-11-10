@@ -10,7 +10,10 @@ Done /（反查任务总数 - Void），分母为 0 时取 0。
 import json
 from pathlib import Path
 
+from .domain import spec_path
+from .errors import PlatformError
 from .gitrepo import current_head
+from .taskfile import read_task
 
 PENDING_VERIFICATION_STATE = "Implemented"
 RECENT_EVENTS_LIMIT = 20
@@ -213,3 +216,64 @@ def requirement_detail(repository, requirement_id):
         "body": body,
         "tasks": requirement_task_ids(tasks, requirement_id),
     }
+
+
+def task_board(repository):
+    """GET /api/tasks 看板负载：tasks/ 下每条任务元数据（含 spec_pin 版本与租约）。
+
+    字段口径与 AC-01 一致：task_id/title/state/requirement/spec_pin（含 version）/
+    lease（claimed_by 与 expires_at，无租约为 null）/updated_at；列表数与
+    tasks/ 目录数一致（与 list_tasks 同一遍历口径）。spec_pin 额外带顶层
+    version（= 钉扎验收卡版本），便于看板消费方直接取版本号。
+    """
+    records = []
+    for record in list_tasks(repository):
+        pin = record.get("spec_pin")
+        if isinstance(pin, dict) and "version" not in pin:
+            version = (pin.get("acceptance_card") or {}).get("version")
+            if version is None:
+                for key in ("contract", "mapping"):
+                    version = (pin.get(key) or {}).get("version")
+                    if version is not None:
+                        break
+            if version is not None:
+                record["spec_pin"] = {**pin, "version": version}
+        records.append(record)
+    return records
+
+
+def pinned_acceptance_card(repository, metadata):
+    """读钉扎验收卡全文（specs/{spec_id}/{version}/acceptance-card.json）。
+
+    未钉扎或读取/解析失败时返回 None。
+    """
+    pin = metadata.get("spec_pin")
+    if not isinstance(pin, dict) or not metadata.get("spec_id"):
+        return None
+    try:
+        path = spec_path(repository, metadata, "acceptance_card")
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, KeyError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def task_detail(repository, task_id):
+    """GET /api/tasks/{id} 的 result 负载；任务不存在时返回 None。
+
+    负载含 metadata（title/state/owner/requirement/spec_pin）、task.md 正文
+    （body）与钉扎验收卡全文（card，未钉扎为 None）。
+    """
+    repository = Path(repository)
+    path = repository / "tasks" / task_id / "task.md"
+    if not path.is_file():
+        return None
+    try:
+        metadata, body = read_task(path)
+    except PlatformError:
+        return None
+    detail = dict(metadata)
+    detail["task_id"] = task_id
+    detail["body"] = body
+    detail["card"] = pinned_acceptance_card(repository, metadata)
+    return detail
