@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import json
 import os
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -21,11 +22,19 @@ import urllib.request
 from pathlib import Path
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
-REQUEST_TIMEOUT = 60
+# 客户端请求超时（债务 #11a）：env 可配，未设置缺省 60；perform() 使用时转 float。
+REQUEST_TIMEOUT = os.environ.get("SIGNET_REQUEST_TIMEOUT", "60")
 HTTP_EXIT_CODES = {400: 2, 409: 3}
 ROLE_HEADER = "X-Signet-Role"
 CLIENT_FILE = "client.json"
 SECRET_FILE = "server-secret"
+
+
+def timeout_seconds():
+    try:
+        return float(REQUEST_TIMEOUT)
+    except (TypeError, ValueError):
+        return 60.0
 
 
 class ClientInputError(Exception):
@@ -87,6 +96,49 @@ def resolve_token():
     return token if isinstance(token, str) and token.strip() else None
 
 
+def resolve_cli_user():
+    """CLI 本人登录身份（client.json 的 user 字段），用于 sigt 委托流的 on_behalf_of 归因。"""
+    config_path = client_config_path()
+    if not config_path.is_file():
+        return None
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    user = config.get("user")
+    return user if isinstance(user, str) and user.strip() else None
+
+
+def server_secret_candidates():
+    """本机服务端密钥的候选路径：USERPROFILE 优先，回落 HOMEDRIVE/HOMEPATH。
+
+    临时 HOME（USERPROFILE 覆写）下验签必须仍能取到机器级密钥——
+    USERPROFILE 覆写用于隔离 client.json，不应把密钥也隔离掉。
+    """
+    candidates = [user_home()]
+    home_drive = os.environ.get("HOMEDRIVE")
+    home_path = os.environ.get("HOMEPATH")
+    if home_drive and home_path:
+        candidates.append(Path(home_drive + home_path))
+    unique = []
+    for candidate in candidates:
+        if candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+def read_server_secret():
+    for candidate in server_secret_candidates():
+        secret_path = candidate / ".signet" / SECRET_FILE
+        try:
+            return secret_path.read_bytes(), secret_path
+        except OSError:
+            continue
+    return None, user_home() / ".signet" / SECRET_FILE
+
+
 def store_client_config(base_url, token, user=None):
     directory = client_config_path().parent
     directory.mkdir(parents=True, exist_ok=True)
@@ -145,7 +197,7 @@ def perform(method, url, fields=None, files=None, role=None, token=None, sigt=No
         body = None
     request = urllib.request.Request(url, data=body, method=method, headers=headers)
     try:
-        with _REQUEST_OPENER.open(request, timeout=REQUEST_TIMEOUT) as response:
+        with _REQUEST_OPENER.open(request, timeout=timeout_seconds()) as response:
             content = response.read()
             return (response.status, content) if raw else (response.status, decode_json(content))
     except urllib.error.HTTPError as error:
@@ -161,6 +213,8 @@ def resolve_task_id(workspace):
         text = path.read_text(encoding="utf-8")
     except OSError as error:
         raise ClientInputError("task.not_found", f"无法读取工作区 task.md: {workspace}") from error
+    # CRLF 行尾容忍（债务 #11c）：与服务端 read_task 同一归一化口径。
+    text = text.replace("\r\n", "\n")
     if not text.startswith("---\n"):
         raise ClientInputError("task.invalid_frontmatter", "task.md 必须以 JSON frontmatter 开头")
     end = text.find("\n---\n", 4)
@@ -185,6 +239,74 @@ def read_upload(path, missing_code, missing_exit=2):
 
 def present(fields):
     return {key: value for key, value in fields.items() if value is not None}
+
+
+def _git_local(repository, arguments, timeout=60):
+    return subprocess.run(
+        ["git", "-C", str(repository), *arguments],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        check=False,
+    )
+
+
+def local_git_ship(task_id):
+    """ship 的 CLI 本机副作用（AC-05）：平台仓由 SIGNET_PLATFORM_REPO 定位——
+    工作副本有未提交改动时 add/commit/push（提交信息含 task_id），干净时幂等 noop。
+    纯本机 git 操作，不经服务端；task.shipped 事件由 API ship / close --ship 落账。
+    """
+    root = os.environ.get("SIGNET_PLATFORM_REPO") or ""
+    if not root.strip():
+        raise ClientInputError(
+            "ship.platform_repo_required",
+            "ship 需要环境变量 SIGNET_PLATFORM_REPO 定位平台仓工作副本",
+        )
+    root = Path(root)
+    probe = _git_local(root, ["rev-parse", "--is-inside-work-tree"])
+    if probe.returncode != 0 or probe.stdout.strip() != "true":
+        raise ClientInputError("ship.not_a_worktree", f"SIGNET_PLATFORM_REPO 不是 git 工作副本: {root}")
+    committed = False
+    status = _git_local(root, ["status", "--porcelain"])
+    if status.returncode != 0:
+        raise ClientInputError("ship.status_failed", f"无法读取工作副本状态: {(status.stderr or '')[-200:]}")
+    if status.stdout.strip():
+        add = _git_local(root, ["add", "-A"])
+        if add.returncode != 0:
+            raise ClientInputError("ship.add_failed", f"git add 失败: {(add.stderr or '')[-200:]}")
+        commit = _git_local(root, ["commit", "-m", f"ship: task {task_id}"])
+        if commit.returncode != 0:
+            raise ClientInputError("ship.commit_failed", f"git commit 失败: {(commit.stderr or '')[-200:]}")
+        committed = True
+    pushed = False
+    remotes = _git_local(root, ["remote"])
+    if remotes.returncode == 0 and remotes.stdout.strip():
+        remote = remotes.stdout.splitlines()[0].strip()
+        push = _git_local(root, ["push", remote, "HEAD"], timeout=120)
+        pushed = push.returncode == 0
+        if not pushed:
+            raise ClientInputError("ship.push_failed", f"git push 失败: {(push.stderr or '')[-200:]}")
+    head = _git_local(root, ["rev-parse", "HEAD"])
+    commit_hash = head.stdout.strip() if head.returncode == 0 else None
+    return {
+        "task_id": task_id,
+        "platform_repo": str(root),
+        "committed": committed,
+        "noop": not committed,
+        "pushed": pushed,
+        "commit_hash": commit_hash,
+    }
+
+
+def run_local_ship(arguments):
+    try:
+        result = local_git_ship(arguments.task_id)
+    except ClientInputError as error:
+        return emit_error(error.code, error.message, error.details, error.exit_code)
+    print(json.dumps({"ok": True, "result": result}, ensure_ascii=True, sort_keys=True))
+    return 0
 
 
 def contract_assets(contract_path):
@@ -235,6 +357,15 @@ def build_request(role, arguments, sigt_payload=None):
         return resolve_task_id(arguments.workspace)
 
     command = arguments.command
+
+    def sigt_attribution():
+        # AC-16 委托流归因：actor=令牌签发人（问责锁定），on_behalf_of=CLI 本人登录身份（执行者）。
+        fields = {"actor": sigt_payload["actor"]}
+        cli_user = resolve_cli_user()
+        if cli_user:
+            fields["on_behalf_of"] = cli_user
+        return fields
+
     if command == "health":
         return "GET", "/api/health", None, None
     if command == "login":
@@ -251,26 +382,43 @@ def build_request(role, arguments, sigt_payload=None):
         return "GET", f"/api/tasks/{task_id()}/status?{query}", None, None
     if command == "claim":
         if sigt_payload:
-            return "POST", f"/api/tasks/{task_id()}/claims", {}, None
+            return "POST", f"/api/tasks/{task_id()}/claims", sigt_attribution(), None
         fields = present({"workspace": arguments.workspace, "actor": arguments.actor, "on_behalf_of": arguments.on_behalf_of})
         return "POST", f"/api/tasks/{task_id()}/claims", fields, None
     if command == "submit":
-        fields = {} if sigt_payload else present({"workspace": arguments.workspace, "actor": arguments.actor, "on_behalf_of": arguments.on_behalf_of})
+        fields = dict(sigt_attribution()) if sigt_payload else present({"workspace": arguments.workspace, "actor": arguments.actor, "on_behalf_of": arguments.on_behalf_of})
         files = [("report", *read_upload(arguments.report, "internal.error", missing_exit=4))]
         files.extend(("evidence", *read_upload(path, "submit.evidence_missing")) for path in arguments.evidence)
         return "POST", f"/api/tasks/{task_id()}/submission", fields, files
     if command == "block":
-        fields = present({"workspace": arguments.workspace, "actor": arguments.actor, "on_behalf_of": arguments.on_behalf_of, "reason": arguments.reason})
+        fields = dict(sigt_attribution()) if sigt_payload else present({"workspace": arguments.workspace, "actor": arguments.actor, "on_behalf_of": arguments.on_behalf_of, "reason": arguments.reason})
+        if "reason" not in fields:
+            fields["reason"] = arguments.reason
         files = [("evidence", *read_upload(path, "submit.evidence_missing")) for path in arguments.evidence]
         return "POST", f"/api/tasks/{task_id()}/blocks", fields, files
     if command == "enhancement":
-        fields = present({"workspace": arguments.workspace, "actor": arguments.actor, "on_behalf_of": arguments.on_behalf_of, "title": arguments.title, "details": arguments.details})
+        fields = dict(sigt_attribution()) if sigt_payload else present({"workspace": arguments.workspace, "actor": arguments.actor, "on_behalf_of": arguments.on_behalf_of, "title": arguments.title, "details": arguments.details})
+        for key in ("title", "details", "workspace"):
+            if key not in fields and hasattr(arguments, key):
+                value = getattr(arguments, key)
+                if value is not None:
+                    fields[key] = value
         return "POST", f"/api/tasks/{task_id()}/enhancements", fields, None
     if command == "collab-send":
-        fields = present({"workspace": arguments.workspace, "actor": arguments.actor, "on_behalf_of": arguments.on_behalf_of, "type": arguments.type, "to_task": arguments.to_task, "summary": arguments.summary, "details": arguments.details})
+        fields = dict(sigt_attribution()) if sigt_payload else present({"workspace": arguments.workspace, "actor": arguments.actor, "on_behalf_of": arguments.on_behalf_of, "type": arguments.type, "to_task": arguments.to_task, "summary": arguments.summary, "details": arguments.details})
+        for key in ("type", "to_task", "summary", "details", "workspace"):
+            if key not in fields and hasattr(arguments, key):
+                value = getattr(arguments, key)
+                if value is not None:
+                    fields[key] = value
         return "POST", f"/api/tasks/{task_id()}/collaborations", fields, None
     if command == "collab-answer":
-        fields = present({"workspace": arguments.workspace, "actor": arguments.actor, "on_behalf_of": arguments.on_behalf_of, "action": arguments.action, "note": arguments.note})
+        fields = dict(sigt_attribution()) if sigt_payload else present({"workspace": arguments.workspace, "actor": arguments.actor, "on_behalf_of": arguments.on_behalf_of, "action": arguments.action, "note": arguments.note})
+        for key in ("action", "note", "workspace"):
+            if key not in fields and hasattr(arguments, key):
+                value = getattr(arguments, key)
+                if value is not None:
+                    fields[key] = value
         return "POST", f"/api/collaborations/{arguments.message_id}/answers", fields, None
     if command == "init-repository":
         fields = present({"repo": arguments.repo, "actor": arguments.actor, "name": arguments.name, "owner": arguments.owner})
@@ -320,7 +468,16 @@ def build_request(role, arguments, sigt_payload=None):
         fields = present({"repo": arguments.repo, "category": arguments.category, "reason": arguments.reason, "actor": arguments.actor, "workspace": arguments.workspace, "push": str(arguments.push).lower()})
         return "POST", f"/api/tasks/{arguments.task_id}/reject", fields, None
     if command == "close":
-        fields = present({"repo": arguments.repo, "decision": arguments.decision, "actor": arguments.actor, "reason": arguments.reason, "push": str(arguments.push).lower()})
+        fields = present({
+            "repo": arguments.repo,
+            "decision": arguments.decision,
+            "actor": arguments.actor,
+            "reason": arguments.reason,
+            "push": str(arguments.push).lower(),
+            "ship": str(getattr(arguments, "ship", False)).lower(),
+            "ship_commit": getattr(arguments, "ship_commit", None),
+            "ship_fingerprint": getattr(arguments, "ship_fingerprint", None),
+        })
         return "POST", f"/api/tasks/{arguments.task_id}/close", fields, None
     if command == "void":
         fields = present({"repo": arguments.repo, "reason": arguments.reason, "actor": arguments.actor, "push": str(arguments.push).lower()})
@@ -378,10 +535,8 @@ def verify_sigt_local(token):
         return None, "sigt.invalid", "handoff 令牌（sigt）负载不是合法 JSON"
     if not isinstance(payload.get("task"), str) or not payload["task"]:
         return None, "sigt.invalid", "handoff 令牌（sigt）负载缺少 task"
-    secret_path = user_home() / ".signet" / SECRET_FILE
-    try:
-        secret = secret_path.read_bytes()
-    except OSError:
+    secret, secret_path = read_server_secret()
+    if secret is None:
         return None, "auth.secret_missing", f"无法本地验签：本机缺少服务端密钥 {secret_path}"
     expected = hmac.new(secret, segment.encode("ascii"), hashlib.sha256).hexdigest()[:32]
     if not hmac.compare_digest(expected, signature):
@@ -404,10 +559,8 @@ def inspect_handoff(token):
         payload = None
     if not isinstance(payload, dict):
         return emit_error("sigt.invalid", "token payload is not valid base64url JSON", {}, 2)
-    secret_path = user_home() / ".signet" / SECRET_FILE
-    try:
-        secret = secret_path.read_bytes()
-    except OSError:
+    secret, secret_path = read_server_secret()
+    if secret is None:
         return emit_error("auth.secret_missing", f"server secret does not exist: {secret_path}", {}, 2)
     expected = hmac.new(secret, segment.encode("ascii"), hashlib.sha256).hexdigest()[:32]
     valid = hmac.compare_digest(expected, signature)
@@ -506,8 +659,12 @@ def handoff_claim(arguments):
         return emit_error(code, message, {}, 2)
     task_id = payload["task"]
     base_url = resolve_base_url()
+    fields = {"actor": payload["actor"]}
+    cli_user = resolve_cli_user()
+    if cli_user:
+        fields["on_behalf_of"] = cli_user
     try:
-        status, response = perform("POST", f"{base_url}/api/tasks/{task_id}/claims", fields={}, sigt=arguments.handoff)
+        status, response = perform("POST", f"{base_url}/api/tasks/{task_id}/claims", fields=fields, sigt=arguments.handoff)
     except ServiceUnavailable as error:
         return emit_unreachable(error)
     if not (isinstance(response, dict) and response.get("ok")):
@@ -589,6 +746,10 @@ def parser_for(role):
         close.add_argument("--actor", required=True)
         close.add_argument("--reason")
         close.add_argument("--push", action="store_true")
+        close.add_argument("--ship", action="store_true", help="close 后顺带执行本机 ship（git add/commit/push 由 CLI 在 SIGNET_PLATFORM_REPO 工作副本执行）")
+        ship_parser = subparsers.add_parser("ship")
+        ship_parser.add_argument("--repo", required=True)
+        ship_parser.add_argument("--task-id", required=True)
         void = subparsers.add_parser("void")
         void.add_argument("--repo", required=True)
         void.add_argument("--task-id", required=True)
@@ -627,6 +788,9 @@ def parser_for(role):
         inbox.add_argument("--repo", required=True)
         inbox.add_argument("--task-id")
     else:
+        agent_login = subparsers.add_parser("login")
+        agent_login.add_argument("--user", required=True)
+        agent_login.add_argument("--password", required=True)
         inspect_parser = subparsers.add_parser("handoff-inspect")
         inspect_parser.add_argument("token")
         claim_parser = subparsers.add_parser("claim")
@@ -695,9 +859,23 @@ def run(role, argv=None):
         return inspect_handoff(arguments.token)
     if role == "agent" and arguments.command == "claim" and getattr(arguments, "handoff", None):
         return handoff_claim(arguments)
-    sigt = None
-    sigt_payload = None
-    if role == "agent":
+    if role == "operator" and arguments.command == "ship":
+        return run_local_ship(arguments)
+    if role == "operator" and arguments.command == "close" and getattr(arguments, "ship", False):
+        # close --ship（AC-07）：先在本机执行 ship 副作用（平台仓由 SIGNET_PLATFORM_REPO
+        # 定位），拿到 commit_hash 后随 close 请求一并落账 task.closed + task.shipped。
+        try:
+            ship_result = local_git_ship(arguments.task_id)
+        except ClientInputError as error:
+            return emit_error(error.code, error.message, error.details, error.exit_code)
+        arguments.ship_commit = ship_result.get("commit_hash")
+        arguments.ship_fingerprint = None
+        return dispatch_request(role, arguments, sigt=None, sigt_payload=None)
+    return dispatch_request(role, arguments, sigt=None, sigt_payload=None)
+
+
+def dispatch_request(role, arguments, sigt, sigt_payload):
+    if role == "agent" and sigt is None:
         workspace = getattr(arguments, "workspace", None)
         token = workspace_handoff_token(workspace) if workspace else None
         if token:

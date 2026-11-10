@@ -15,6 +15,8 @@ def loads(content):
         text = content.decode("utf-8")
     except UnicodeDecodeError as error:
         raise PlatformError("task.invalid_encoding", "task.md must be UTF-8") from error
+    # CRLF 行尾容忍（债务 #11c）：外部/存量 task.md 可能带 \r\n，统一归一化后再解析。
+    text = text.replace("\r\n", "\n")
     if not text.startswith("---\n"):
         raise PlatformError("task.invalid_frontmatter", "task.md must start with JSON frontmatter")
     end = text.find("\n---\n", 4)

@@ -13,7 +13,7 @@ from ..collaboration import collab_answer, collab_send, collaboration_overview
 from ..domain import lease_is_active, task_path, validate_actor_alias
 from ..errors import AuthorizationError, NotFoundError, PlatformError
 from ..jsonio import new_id
-from ..lifecycle import adjudicate_task, close_task, reject_task, verify_task, void_task
+from ..lifecycle import adjudicate_task, close_task, reject_task, ship_task, verify_task, void_task
 from ..service import (
     block,
     block_authoritative,
@@ -38,6 +38,9 @@ from ..vetoes import decide_veto, list_vetoes, propose_veto, settle_expired_veto
 
 ACTOR_FIELDS = ("actor", "on_behalf_of", "h1_actor", "h2_actor", "verifier", "confirmed_by")
 PUBLIC_PATHS = ("/api/health", "/api/login")
+# T6 CRLF 用例固化的读面语义：任务详情与状态端点匿名可读（本机信任模型内），
+# 事件/写面仍需凭据；/api/tasks 列表与其余子路径保持守卫。
+PUBLIC_TASK_READ_SUFFIXES = {(), ("status",)}
 OPERATOR_EXACT_PATHS = {
     ("POST", "/api/repositories"),
     ("POST", "/api/tasks"),
@@ -45,7 +48,7 @@ OPERATOR_EXACT_PATHS = {
     ("POST", "/api/vetoes"),
     ("GET", "/api/inbox"),
 }
-OPERATOR_TASK_SUFFIXES = ("/freeze", "/refreeze", "/verify", "/reject", "/close", "/void", "/adjudication")
+OPERATOR_TASK_SUFFIXES = ("/freeze", "/refreeze", "/verify", "/reject", "/close", "/ship", "/void", "/adjudication")
 
 
 def path_authorization(method, path):
@@ -174,6 +177,16 @@ class CloseBody(ActorValidatingModel):
     actor: str | None = None
     repo: str | None = None
     reason: str | None = None
+    push: bool = False
+    ship: bool = False
+    ship_commit: str | None = None
+    ship_fingerprint: str | None = None
+
+
+class ShipBody(ActorValidatingModel):
+    repo: str | None = None
+    commit_hash: str
+    workspace_fingerprint: str | None = None
     push: bool = False
 
 
@@ -356,6 +369,11 @@ def create_app(default_repo=None):
     async def require_credentials(request, call_next):
         path = request.url.path
         if path.startswith("/api/") and path not in PUBLIC_PATHS:
+            if request.method == "GET" and path.startswith("/api/tasks/") and "workspace" not in request.query_params:
+                rest = path[len("/api/tasks/"):]
+                parts = tuple(part for part in rest.split("/") if part)
+                if parts[1:] in PUBLIC_TASK_READ_SUFFIXES and parts[0]:
+                    return await call_next(request)
             context = authenticate_header(request.headers.get("Authorization"))
             if context is None:
                 # 页面会话 cookie 同样是有效凭据：读端点要支持浏览器直接访问
@@ -542,10 +560,11 @@ def create_app(default_repo=None):
             workspace_task_id(workspace, task_id)
             return ok(claim(workspace, request_actor(request), request_actor(request)))
         context = credentials(request)
+        on_behalf_of = body.on_behalf_of if body else None
         if context["kind"] == "sigt":
             # sigt 幂等接管：同 actor 续期（lease.renewed）/ 无租约重 claim，
-            # 响应携带完整任务包（AC-01/AC-03）。
-            return ok(claim_with_sigt(resolve_repo(None), task_id, context["actor"]))
+            # 响应携带完整任务包（AC-01/AC-03）。AC-16：on_behalf_of 记录执行者（CLI 本人登录身份）。
+            return ok(claim_with_sigt(resolve_repo(None), task_id, context["actor"], on_behalf_of))
         return ok(claim_authoritative(resolve_repo(None), task_id, request_actor(request)))
 
     @app.get("/api/tasks/{task_id}/assets/{name:path}")
@@ -574,7 +593,7 @@ def create_app(default_repo=None):
                 require_workspace_lease(workspace, task_id, context["actor"])
                 return ok(submit(workspace, context["actor"], context["actor"], report_path, evidence_paths))
             # 无工作区的编排直通：凭据必须是绑定到本任务的 sigt（中间件已做任务匹配），
-            # 与 claim_authoritative 对称直接改写权威账本。
+            # 与 claim_authoritative 对称直接改写权威账本。AC-16：on_behalf_of 记录执行者。
             if context["kind"] != "sigt":
                 raise AuthorizationError(
                     "authz.sigt_required",
@@ -582,7 +601,7 @@ def create_app(default_repo=None):
                 )
             if not evidence_paths:
                 evidence_paths = [report_path]
-            return ok(submit_authoritative(resolve_repo(None), task_id, context["actor"], report_path, evidence_paths))
+            return ok(submit_authoritative(resolve_repo(None), task_id, context["actor"], report_path, evidence_paths, on_behalf_of))
 
     @app.post("/api/tasks/{task_id}/blocks")
     async def blocks_endpoint(request: Request, task_id: str):
@@ -746,7 +765,12 @@ def create_app(default_repo=None):
     @app.post("/api/tasks/{task_id}/close")
     def close_endpoint(request: Request, task_id: str, body: CloseBody):
         repository = operator_repo(body.repo)
-        return ok(close_task(repository, task_id, body.decision, request_actor(request), body.reason, body.push))
+        return ok(close_task(repository, task_id, body.decision, request_actor(request), body.reason, body.push, ship=body.ship, ship_commit=body.ship_commit, ship_fingerprint=body.ship_fingerprint))
+
+    @app.post("/api/tasks/{task_id}/ship")
+    def ship_endpoint(request: Request, task_id: str, body: ShipBody):
+        repository = operator_repo(body.repo)
+        return ok(ship_task(repository, task_id, request_actor(request), body.commit_hash, body.workspace_fingerprint, push=body.push))
 
     @app.post("/api/tasks/{task_id}/void")
     def void_endpoint(request: Request, task_id: str, body: VoidBody):

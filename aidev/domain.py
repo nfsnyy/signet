@@ -1,5 +1,6 @@
 import json
 import re
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -19,6 +20,15 @@ WORKSPACE_DIRECTORIES = ("contract", "evidence", "inbox", "outbox", "outbox-coll
 REFREEZABLE_STATES = {"Ready", "In Progress", "Implemented", "Blocked"}
 
 VOIDABLE_BY_SPEC_INVALIDATION = {"Ready", "In Progress", "Implemented", "Verified", "Blocked"}
+
+
+def resolve_workspace_directory(workspace):
+    """编排工作区落点（债务 #11b）：相对路径工作区落系统临时目录，
+    不得在平台仓/服务进程 CWD 下物化 ws-* 目录；绝对路径原样使用。"""
+    path = Path(workspace)
+    if not path.is_absolute():
+        path = Path(tempfile.gettempdir()) / path
+    return path.resolve()
 
 
 def same_pin(left, right):
@@ -157,15 +167,17 @@ def workspace_agents(metadata):
 """
 
 
-def apply_claim(proposal, metadata):
-    if metadata.get("state") != "Ready":
-        return None, rejection(proposal, metadata, "claim.not_ready", "authoritative task is not Ready")
+def apply_claim(proposal, metadata, allow_draft=False):
+    allowed_states = ("Ready", "Draft") if allow_draft else ("Ready",)
+    if metadata.get("state") not in allowed_states:
+        return None, rejection(proposal, metadata, "claim.not_ready", "authoritative task is not claimable")
     code, message = base_is_current(proposal, metadata)
     if code:
         return None, rejection(proposal, metadata, code, message)
     if lease_is_active(metadata.get("lease")):
         return None, rejection(proposal, metadata, "claim.lease_active", "authoritative task already has an active lease")
     now = datetime.now(timezone.utc)
+    before = metadata.get("state")
     metadata["lease"] = {
         "claimed_by": proposal["actor"],
         "claimed_at": utc_now(),
@@ -179,7 +191,7 @@ def apply_claim(proposal, metadata):
         proposal["task_id"],
         proposal["actor"],
         proposal["on_behalf_of"],
-        "Ready",
+        before,
         "In Progress",
         proposal_id=proposal["proposal_id"],
         payload={"lease": metadata["lease"]},

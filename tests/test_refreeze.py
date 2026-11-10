@@ -96,12 +96,22 @@ class RefreezeTests(WorkflowTestCase):
         self.claim_and_sync(repository, workspace)
         self.assertEqual("In Progress", self.task_state(repository, task_id))
 
-    def test_refreeze_rejects_draft_task_without_pin(self):
+    def test_refreeze_draft_task_without_pin_freezes_as_v2(self):
+        # refreeze v2 补卡（T6）：Draft 未冻结任务允许 refreeze——以虚拟 v1 基线
+        # 直接冻结为 v2，事件与元数据口径与常规 refreeze 一致。
         repository, _ = self.init_state_repo()
         workspace, task_id, _ = self.init_task(repository, "refreeze-draft")
         card, contract, mapping = self.revised_artifacts(task_id)
-        result = self.refreeze(repository, workspace, task_id, card, contract, mapping, expected_exit=2)
-        self.assertEqual("refreeze.no_spec", result["error"]["code"])
+        result = self.refreeze(repository, workspace, task_id, card, contract, mapping)
+        pin = result["result"]["spec_pin"]
+        self.assertEqual("2", pin["acceptance_card"]["version"])
+        self.assertEqual("1", result["result"]["supersedes"])
+        self.assertEqual("Ready", self.task_state(repository, task_id))
+        metadata, _ = self.read_task(Path(repository) / "tasks" / task_id / "task.md")
+        self.assertEqual(pin, metadata["spec_pin"])
+        events = [json.loads(line) for line in (Path(repository) / "events" / "events.jsonl").read_text(encoding="utf-8").splitlines() if line]
+        confirmed = [e for e in events if e.get("task_id") == task_id and e["event_type"] == "specification.content_confirmed"]
+        self.assertTrue(any(e.get("payload", {}).get("version") == "2" for e in confirmed))
 
     def test_refreeze_rejects_invalid_three_piece_and_keeps_old_version(self):
         repository, _ = self.init_state_repo()

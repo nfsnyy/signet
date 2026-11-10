@@ -5,7 +5,7 @@ import stat
 import time
 from pathlib import Path
 
-from .domain import REFREEZABLE_STATES, SPEC_FILES, event_path, make_event, task_path, workspace_agents
+from .domain import REFREEZABLE_STATES, SPEC_FILES, event_path, make_event, resolve_workspace_directory, task_path, workspace_agents
 from .errors import OperationalError, PlatformError
 from .gitrepo import commit_paths, ensure_repository
 from .jsonio import append_jsonl, sha256_file, utc_now, write_json
@@ -222,19 +222,42 @@ def validate_environment_and_cases(contract, contract_file):
             raise PlatformError("c3.asset_hash_mismatch", f"asset hash does not match contract: {asset}")
 
 
-def copy_contract_assets(contract, contract_file, spec_directory, copied):
+def copy_contract_assets(contract, contract_file, spec_directory, copied, repository=None):
     source_directory = Path(contract_file).resolve().parent
     for asset in contract_asset_paths(contract):
         source = source_directory / asset
         if not source.is_file():
-            # 编排式 freeze 未上传资产文件：跳过拷贝（不进入冻结规格）。
-            continue
+            # 编排式 freeze 未上传资产文件：先在状态仓已冻结规格里按声明哈希
+            # 内容寻址找回（同哈希=同内容），找不到才跳过（不进入冻结规格）。
+            recovered = recover_frozen_asset(repository, contract, asset) if repository else None
+            if recovered is None:
+                continue
+            source = recovered
         target = (Path(spec_directory) / asset).resolve()
         if Path(spec_directory).resolve() not in target.parents and target != Path(spec_directory).resolve():
             raise PlatformError("c3.invalid_asset_path", f"asset escapes the spec directory: {asset}")
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
         copied.append(target.relative_to(spec_directory.parents[2]))
+
+
+def recover_frozen_asset(repository, contract, asset):
+    """按 contract.assets 声明的 sha256，在状态仓 specs/ 已冻结文件中找回编排未上传的资产。"""
+    expected = (contract.get("assets") or {}).get(asset)
+    if not isinstance(expected, str) or len(expected) != 64 or repository is None:
+        return None
+    specs_root = Path(repository) / "specs"
+    if not specs_root.is_dir():
+        return None
+    for candidate in sorted(specs_root.rglob(Path(asset).name)):
+        if not candidate.is_file() or candidate.name in SPEC_FILES.values():
+            continue
+        try:
+            if sha256_file(candidate) == expected:
+                return candidate
+        except OSError:
+            continue
+    return None
 
 
 def validate_three_piece(card, contract, mapping, operation_source, contract_file):
@@ -316,7 +339,7 @@ def execute_baseline_cases(repository, spec_directory, metadata, contract, pin):
 
 def freeze_task(repository, task_id, workspace, card_file, contract_file, mapping_file, operation_source, h1_actor, h2_actor, push=False):
     repository = ensure_repository(repository)
-    workspace = Path(workspace).resolve() if workspace else None
+    workspace = resolve_workspace_directory(workspace) if workspace else None
     lock = repository_lock(repository, "freeze")
     try:
         path = task_path(repository, task_id)
@@ -347,7 +370,7 @@ def freeze_task(repository, task_id, workspace, card_file, contract_file, mappin
             shutil.copyfile(sources[key], target)
             copied.append(target.relative_to(repository))
             pin[key] = {"version": version, "sha256": sha256_file(target)}
-        copy_contract_assets(contract, contract_file, spec_directory, copied)
+        copy_contract_assets(contract, contract_file, spec_directory, copied, repository)
         baseline_records = []
         baseline_paths = []
         if contract.get("contract_type") == "baseline":
@@ -375,6 +398,7 @@ def freeze_task(repository, task_id, workspace, card_file, contract_file, mappin
         if workspace is not None:
             write_task(workspace / "task.md", metadata, body)
             (workspace / "AGENTS.md").write_text(workspace_agents(metadata), encoding="utf-8", newline="\n")
+            (workspace / "contract").mkdir(parents=True, exist_ok=True)
             for key, filename in SPEC_FILES.items():
                 shutil.copyfile(spec_directory / filename, workspace / "contract" / filename)
         return {"task_id": task_id, "spec_id": spec_id, "version": version, "spec_pin": pin, "state": "Ready", "commit": commit}
@@ -384,7 +408,7 @@ def freeze_task(repository, task_id, workspace, card_file, contract_file, mappin
 
 def refreeze_task(repository, task_id, workspace, card_file, contract_file, mapping_file, operation_source, h1_actor, h2_actor, reason, push=False):
     repository = ensure_repository(repository)
-    workspace = Path(workspace).resolve() if workspace else None
+    workspace = resolve_workspace_directory(workspace) if workspace else None
     if not reason or not reason.strip():
         raise PlatformError("refreeze.reason_required", "refreeze reason is required")
     lock = repository_lock(repository, "freeze")
@@ -394,13 +418,26 @@ def refreeze_task(repository, task_id, workspace, card_file, contract_file, mapp
             raise PlatformError("task.not_found", f"task does not exist: {task_id}")
         metadata, body = read_task(path)
         pin = metadata.get("spec_pin")
-        if not pin:
-            raise PlatformError("refreeze.no_spec", "task has no frozen specification; use freeze instead", details={"state": metadata.get("state")})
         before = metadata.get("state")
-        if before not in REFREEZABLE_STATES:
-            raise PlatformError("refreeze.invalid_state", "task state cannot be refrozen", details={"state": before})
+        if not pin:
+            # refreeze v2 补卡：Draft 未冻结任务允许 refreeze——以虚拟 v1 基线
+            # 直接冻结为 v2（supersedes="1"），事件与元数据口径与常规 refreeze 一致。
+            if before != "Draft":
+                raise PlatformError("refreeze.no_spec", "task has no frozen specification; use freeze instead", details={"state": before})
+            old_version = "1"
+            pin = {
+                "spec_id": metadata["spec_id"],
+                "acceptance_card": {"version": "1", "sha256": None},
+                "contract": {"version": "1", "sha256": None},
+                "mapping": {"version": "1", "sha256": None},
+            }
+            initial_freeze = True
+        else:
+            if before not in REFREEZABLE_STATES:
+                raise PlatformError("refreeze.invalid_state", "task state cannot be refrozen", details={"state": before})
+            old_version = pin["acceptance_card"]["version"]
+            initial_freeze = False
         spec_id = metadata["spec_id"]
-        old_version = pin["acceptance_card"]["version"]
         version = str(int(old_version) + 1)
         spec_directory = repository / "specs" / spec_id / version
         if spec_directory.exists():
@@ -409,7 +446,7 @@ def refreeze_task(repository, task_id, workspace, card_file, contract_file, mapp
         contract = read_json_document(contract_file, "c2.invalid_contract")
         mapping = read_json_document(mapping_file, "c1.invalid_mapping")
         validate_three_piece(card, contract, mapping, operation_source, contract_file)
-        analysis = classify_refreeze(repository, spec_id, old_version, card, contract, mapping)
+        analysis = {"downgrade_required": False} if initial_freeze else classify_refreeze(repository, spec_id, old_version, card, contract, mapping)
         veto = None
         if analysis["downgrade_required"]:
             file_hashes = {
@@ -433,7 +470,7 @@ def refreeze_task(repository, task_id, workspace, card_file, contract_file, mapp
             shutil.copyfile(sources[key], target)
             copied.append(target.relative_to(repository))
             new_pin[key] = {"version": version, "sha256": sha256_file(target)}
-        copy_contract_assets(contract, contract_file, spec_directory, copied)
+        copy_contract_assets(contract, contract_file, spec_directory, copied, repository)
         baseline_records = []
         baseline_paths = []
         if contract.get("contract_type") == "baseline":
@@ -490,6 +527,7 @@ def refreeze_task(repository, task_id, workspace, card_file, contract_file, mapp
         if workspace is not None:
             write_task(workspace / "task.md", metadata, body)
             (workspace / "AGENTS.md").write_text(workspace_agents(metadata), encoding="utf-8", newline="\n")
+            (workspace / "contract").mkdir(parents=True, exist_ok=True)
             for key, filename in SPEC_FILES.items():
                 shutil.copyfile(spec_directory / filename, workspace / "contract" / filename)
         return {"task_id": task_id, "spec_id": spec_id, "old_version": old_version, "version": version, "supersedes": old_version, "spec_pin": new_pin, "state": "Ready", "commit": commit}

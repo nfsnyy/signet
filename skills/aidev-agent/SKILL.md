@@ -30,6 +30,7 @@ whenToUse: 当任务位于 aidev 工作区（目录里含 task.md、AGENTS.md、
 
 | 动词 | 作用 | 关键参数 | 前置条件 |
 |---|---|---|---|
+| `login` | 登录平台服务，令牌写入本机 `~/.signet/client.json`（sigt 委托流中作为执行者身份来源） | `--user`、`--password` | 服务可达 |
 | `status` | 查看任务状态、inbox/outbox-collab 文件列表（只读） | `--workspace` | 已登录（CLI 自动携带令牌） |
 | `log` | 回放任务事件日志（只读） | `--repo`、`--task-id` | 已登录 |
 | `claim` | 领取任务，生成 claim 提案 | `--actor`、`--on-behalf-of` | 任务 Ready、无活跃租约、contract/ 哈希与 pin 一致 |
@@ -41,7 +42,7 @@ whenToUse: 当任务位于 aidev 工作区（目录里含 task.md、AGENTS.md、
 | `handoff-inspect` | 纯本地解析并验签 handoff 能力令牌（sigt），输出 v/task/actor/repo 与 valid，不联网 | `<令牌>`（位置参数） | 读本机 `~/.signet/server-secret` |
 | `health` | 检查平台服务连通性（只读探针） | 无 | 无 |
 
-operator 面动词（`init-repository/init-task/freeze/refreeze/sync/verify/reject/close/void/adjudicate/veto/inbox/login`）**不是你用的**，不要尝试调用。
+operator 面动词（`init-repository/init-task/freeze/refreeze/sync/verify/reject/close/ship/void/adjudicate/veto/inbox/login`）**不是你用的**，不要尝试调用。
 
 ## 1.1 登录与凭据（T2 起）
 

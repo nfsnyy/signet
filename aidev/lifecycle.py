@@ -6,11 +6,13 @@ from .domain import (
     VOIDABLE_BY_SPEC_INVALIDATION,
     event_path,
     invalid_marker_path,
+    lease_is_active,
     make_event,
     same_pin,
     task_path,
 )
-from .errors import OperationalError, PlatformError
+from .errors import AuthorizationError, OperationalError, PlatformError
+from .fingerprint import workspace_fingerprint
 from .gitrepo import commit_paths, ensure_repository
 from .jsonio import append_jsonl, read_json, read_jsonl, utc_now
 from .runner import execute_contract_cases, frozen_contract, machine_criterion_results
@@ -19,6 +21,7 @@ from .service import (
     propagate_pin_invalidation,
     refresh_workspace,
     stamp_events,
+    task_log,
 )
 from .specs import repository_lock
 from .taskfile import read_task, write_task
@@ -50,9 +53,15 @@ def persist(repository, changed_tasks, events, extra_paths, message, push):
     return {"commit": commit, "pushed": bool(push and commit)}
 
 
-def latest_claim_actor(repository, task_id):
+def latest_claim_implementer(repository, task_id):
+    """实现者判定（AC-16）：最近 claim 事件为 sigt 委托接管（无提案号）时取 on_behalf_of
+    （执行 agent 别名），否则取 actor（经典提案流实现者即 claim actor）。"""
     for event in reversed(read_jsonl(event_path(repository))):
         if event.get("task_id") == task_id and event.get("event_type") == "task.claimed":
+            if not event.get("proposal_id"):
+                delegate = event.get("on_behalf_of")
+                if delegate:
+                    return delegate
             return event.get("actor")
     return None
 
@@ -192,15 +201,17 @@ def verify_task(repository, task_id, verifier, confirmed_by, results_file=None, 
             raise PlatformError("verify.failed_criterion", "verification results contain failed criteria", details={"criteria": failed})
         if not verifier or verifier == confirmed_by:
             raise PlatformError("verify.invalid_roles", "initial verifier and human confirmer must be different identities")
-        implementer = latest_claim_actor(repository, task_id)
+        implementer = latest_claim_implementer(repository, task_id)
         if implementer and (verifier == implementer or confirmed_by == implementer):
             raise PlatformError("verify.self_review", "implementer cannot verify or confirm their own work")
         extra_paths = materialize_machine_evidence(repository, task_id, document) if execute else []
         metadata["state"] = "Verified"
         metadata["updated_at"] = utc_now()
+        # AC-06：verify 落账时记录工作区指纹（算法与 ship 比对共用 aidev.fingerprint）。
+        recorded_fingerprint = workspace_fingerprint()
         events = [
-            make_event("verification.initial", task_id, verifier, verifier, "Implemented", "Implemented", payload={"results": document, "executed": execute}),
-            make_event("verification.confirm", task_id, confirmed_by, confirmed_by, "Implemented", "Verified", payload={"confirmed_by": confirmed_by}),
+            make_event("verification.initial", task_id, verifier, verifier, "Implemented", "Implemented", payload={"results": document, "executed": execute, "workspace_fingerprint": recorded_fingerprint}),
+            make_event("verification.confirm", task_id, confirmed_by, confirmed_by, "Implemented", "Verified", payload={"confirmed_by": confirmed_by, "workspace_fingerprint": recorded_fingerprint}),
             make_event("task.verified", task_id, confirmed_by, confirmed_by, "Implemented", "Verified"),
         ]
         return persist(repository, {task_id: (metadata, body)}, events, extra_paths, f"Verify {task_id}", push)
@@ -245,26 +256,95 @@ def reject_task(repository, task_id, category, reason, actor, workspace=None, pu
         lock.unlink(missing_ok=True)
 
 
-def close_task(repository, task_id, decision, actor, reason=None, push=False):
+def close_task(repository, task_id, decision, actor, reason=None, push=False, ship=False, ship_commit=None, ship_fingerprint=None):
     repository = ensure_repository(repository)
     if decision not in {"accept", "reject"}:
         raise PlatformError("close.invalid_decision", "decision must be accept or reject")
+    if ship and decision != "accept":
+        raise PlatformError("close.ship_requires_accept", "--ship is only meaningful with --decision accept")
     lock = lifecycle_lock(repository)
     try:
         path = task_path(repository, task_id)
         if not path.is_file():
             raise PlatformError("task.not_found", f"task does not exist: {task_id}")
         metadata, body = read_task(path)
-        if metadata.get("state") != "Verified":
-            raise PlatformError("close.invalid_state", "only a Verified task can be closed", details={"state": metadata.get("state")})
+        state = metadata.get("state")
+        # close --ship 允许从 Implemented 一步关闭（AC-07：编排直通流无独立 verify 站）；
+        # 常规 close 仍要求 Verified。
+        allowed_states = {"Verified", "Implemented"} if ship else {"Verified"}
+        if state not in allowed_states:
+            raise PlatformError("close.invalid_state", "task state cannot be closed", details={"state": state})
         if decision == "accept":
             metadata["state"] = "Done"
-            event = make_event("task.closed", task_id, actor, actor, "Verified", "Done", payload={"decision": decision})
+            events = [make_event("task.closed", task_id, actor, actor, state, "Done", payload={"decision": decision})]
+            if ship:
+                fingerprint = ship_fingerprint or workspace_fingerprint()
+                events.append(make_event("task.shipped", task_id, actor, actor, "Done", "Done", payload={"commit_hash": ship_commit, "workspace_fingerprint": fingerprint, "via": "close --ship"}))
         else:
             metadata["state"] = "Verified"
-            event = make_event("close.rejected", task_id, actor, actor, "Verified", "Verified", payload={"decision": decision, "reason": reason or ""})
+            events = [make_event("close.rejected", task_id, actor, actor, "Verified", "Verified", payload={"decision": decision, "reason": reason or ""})]
         metadata["updated_at"] = utc_now()
-        return persist(repository, {task_id: (metadata, body)}, [event], [], f"Close {task_id}", push)
+        result = persist(repository, {task_id: (metadata, body)}, events, [], f"Close {task_id}", push)
+        if ship:
+            result["shipped"] = True
+        return result
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+def latest_verify_fingerprint(events):
+    for event in reversed(events):
+        if str(event.get("event_type", "")).startswith("verification."):
+            fingerprint = (event.get("payload") or {}).get("workspace_fingerprint")
+            if fingerprint:
+                return fingerprint
+    return None
+
+
+def ship_task(repository, task_id, actor, commit_hash, fingerprint, push=False):
+    """Done 任务的 ship 落账（AC-03/AC-04）：指纹比对、同 commit 幂等、异 commit 冲突拒绝。
+
+    git add/commit/push 的本机副作用由 CLI 侧执行（AC-05），本函数只做权威事件记录。
+    """
+    repository = ensure_repository(repository)
+    if not commit_hash or not commit_hash.strip():
+        raise PlatformError("ship.invalid_commit", "commit_hash must be a non-empty string")
+    commit_hash = commit_hash.strip()
+    lock = lifecycle_lock(repository)
+    try:
+        path = task_path(repository, task_id)
+        if not path.is_file():
+            raise PlatformError("task.not_found", f"task does not exist: {task_id}")
+        metadata, body = read_task(path)
+        state = metadata.get("state")
+        if state != "Done":
+            # 带活跃租约的任务说明实现者仍在作业，operator 收尾动作与其冲突 → 403；
+            # 其余非 Done 状态按状态机拒绝（409）。
+            if lease_is_active(metadata.get("lease")):
+                raise AuthorizationError("ship.lease_active", f"task {task_id} has an active lease; ship is not allowed while the task is claimed")
+            raise PlatformError("ship.invalid_state", "only a Done task can be shipped", details={"state": state})
+        events = task_log(repository, task_id)
+        expected = latest_verify_fingerprint(events)
+        if expected and fingerprint != expected:
+            raise PlatformError("ship.fingerprint_mismatch", "workspace_fingerprint does not match the latest verification record", exit_code=3, details={"expected": expected, "provided": fingerprint})
+        shipped = [event for event in events if event.get("event_type") == "task.shipped"]
+        if shipped:
+            last = shipped[-1]
+            last_commit = (last.get("payload") or {}).get("commit_hash")
+            if last_commit == commit_hash:
+                # 同 task + 同 commit 重复 ship 幂等返回，不重复落事件。
+                return {"task_id": task_id, "shipped": True, "idempotent": True, "commit_hash": commit_hash, "commit": None}
+            closed_after = any(
+                event.get("event_type") == "task.closed" and str(event.get("timestamp", "")) > str(last.get("timestamp", ""))
+                for event in events
+            )
+            if not closed_after:
+                raise PlatformError("ship.commit_conflict", "a different commit was already shipped and no newer close exists", details={"shipped_commit": last_commit, "provided": commit_hash})
+        event = make_event("task.shipped", task_id, actor, actor, "Done", "Done", payload={"commit_hash": commit_hash, "workspace_fingerprint": fingerprint})
+        result = persist(repository, {task_id: (metadata, body)}, [event], [], f"Ship {task_id}", push)
+        result["shipped"] = True
+        result["commit_hash"] = commit_hash
+        return result
     finally:
         lock.unlink(missing_ok=True)
 
