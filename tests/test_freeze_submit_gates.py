@@ -162,3 +162,45 @@ class FreezeSubmitGateTests(WorkflowTestCase):
         submitted = self.submit_and_sync(self.repository, workspace)
         self.assertTrue(any(item.get("accepted") for item in submitted["result"]["results"]))
         self.assertEqual("Implemented", self.task_state(self.repository, task_id))
+
+    def test_freeze_accepts_implemented_with_unfrozen_draft(self):
+        # 起草流程：Draft → 编排 claim（claim_authoritative）→ 编排 submit
+        # （submit_authoritative，sigt 直回流的服务端本体）→ Implemented 未钉扎
+        # → operator 签署 freeze → Ready。
+        from aidev.service import claim_authoritative, submit_authoritative
+        workspace, task_id, _ = self.init_task(self.repository, "spec-draft")
+        claim_authoritative(self.repository, task_id, "agent-a")
+        self.assertEqual("In Progress", self.task_state(self.repository, task_id))
+        report = Path(workspace) / "report.json"
+        self.write_json(report, {
+            "implemented": "起草三件套",
+            "executed": [{"command": ["python", "--version"], "output": "local"}],
+            "not_executed": [],
+            "deviations": [],
+            "collaboration_requests": [],
+        })
+        evidence = Path(workspace) / "evidence" / "spec.txt"
+        evidence.parent.mkdir(parents=True, exist_ok=True)
+        evidence.write_text("spec draft\n", encoding="utf-8", newline="\n")
+        submit_authoritative(self.repository, task_id, "agent-a", report, [evidence], on_behalf_of="agent-a")
+        self.assertEqual("Implemented", self.task_state(self.repository, task_id))
+
+        frozen = self.operator([
+            "freeze",
+            "--repo", self.repository,
+            "--task-id", task_id,
+            "--workspace", workspace,
+            "--acceptance-card", self.card,
+            "--contract", self.contract,
+            "--mapping", self.mapping,
+            "--h1-actor", "owner",
+            "--h2-actor", "architect",
+        ])
+        self.assertEqual("Ready", frozen["result"]["state"])
+
+        # 已钉扎的 Implemented 不得再走 freeze（须走 refreeze）。
+        self.claim_and_sync(self.repository, workspace)
+        self.submit_and_sync(self.repository, workspace)
+        self.assertEqual("Implemented", self.task_state(self.repository, task_id))
+        again = self.freeze(task_id, workspace)
+        self.assertEqual("freeze.invalid_state", again["error"]["code"])

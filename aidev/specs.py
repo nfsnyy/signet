@@ -346,8 +346,11 @@ def freeze_task(repository, task_id, workspace, card_file, contract_file, mappin
         if not path.is_file():
             raise PlatformError("task.not_found", f"task does not exist: {task_id}")
         metadata, body = read_task(path)
-        if metadata.get("state") != "Draft":
-            raise PlatformError("freeze.invalid_state", "only a Draft task can be frozen", details={"state": metadata.get("state")})
+        state = metadata.get("state")
+        # Draft：operator 自撰三件套直接冻结；Implemented 且未钉扎：起草会话经 submit
+        # 通道交付草案后由 operator 签署冻结（起草流程的标准门）。
+        if state != "Draft" and not (state == "Implemented" and not metadata.get("spec_pin")):
+            raise PlatformError("freeze.invalid_state", "only a Draft task, or an Implemented task with an unfrozen spec draft, can be frozen", details={"state": state})
         spec_id = metadata["spec_id"]
         version = "1"
         spec_directory = repository / "specs" / spec_id / version
@@ -378,8 +381,8 @@ def freeze_task(repository, task_id, workspace, card_file, contract_file, mappin
             copied.extend(baseline_paths)
         now = utc_now()
         events = [
-            make_event("specification.content_confirmed", task_id, h1_actor, h1_actor, "Draft", "Draft", payload={"spec_id": spec_id, "version": version, "sha256": pin["acceptance_card"]["sha256"]}),
-            make_event("specification.consistency_confirmed", task_id, h2_actor, h2_actor, "Draft", "Draft", payload={"spec_id": spec_id, "version": version, "contract_sha256": pin["contract"]["sha256"], "mapping_sha256": pin["mapping"]["sha256"]}),
+            make_event("specification.content_confirmed", task_id, h1_actor, h1_actor, state, state, payload={"spec_id": spec_id, "version": version, "sha256": pin["acceptance_card"]["sha256"]}),
+            make_event("specification.consistency_confirmed", task_id, h2_actor, h2_actor, state, state, payload={"spec_id": spec_id, "version": version, "contract_sha256": pin["contract"]["sha256"], "mapping_sha256": pin["mapping"]["sha256"]}),
         ]
         if baseline_records:
             events.append(make_event("specification.baseline_verified", task_id, h2_actor, h2_actor, "Draft", "Draft", payload={"spec_id": spec_id, "version": version, "cases": baseline_records}))
@@ -387,8 +390,8 @@ def freeze_task(repository, task_id, workspace, card_file, contract_file, mappin
         metadata["updated_at"] = now
         metadata["state"] = "Ready"
         events.extend([
-            make_event("specification.frozen", task_id, h2_actor, h2_actor, "Draft", "Ready", payload={"spec_id": spec_id, "version": version, "spec_pin": pin}),
-            make_event("task.ready", task_id, h2_actor, h2_actor, "Draft", "Ready", payload={"spec_id": spec_id, "version": version}),
+            make_event("specification.frozen", task_id, h2_actor, h2_actor, state, "Ready", payload={"spec_id": spec_id, "version": version, "spec_pin": pin}),
+            make_event("task.ready", task_id, h2_actor, h2_actor, state, "Ready", payload={"spec_id": spec_id, "version": version}),
         ])
         write_task(path, metadata, body)
         events_file = event_path(repository)
