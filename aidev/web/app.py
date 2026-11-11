@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import tempfile
@@ -6,6 +7,7 @@ from pathlib import Path
 from fastapi import FastAPI, File, Form, Header, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, model_validator
 
 from .. import authn, readmodel
@@ -65,17 +67,52 @@ def path_authorization(method, path):
 
 LOGIN_PAGE = """<!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><title>signet 登录</title></head>
+<head><meta charset="utf-8"><title>signet 登录</title>
+<link rel="stylesheet" href="/static/style.css"></head>
 <body>
-  <h1>signet 平台登录</h1>
-  <form method="post" action="/login">
-    <label>用户：<input name="user" required></label><br>
-    <label>口令：<input name="password" type="password" required></label><br>
-    <button type="submit">登录</button>
+<div class="topbar"><span class="brand">signet</span>
+<nav><a href="/">概况</a><a href="/tasks">任务</a><a href="/requirements">需求</a></nav>
+<span class="user">未登录</span></div>
+<div class="page" style="display:flex;justify-content:center;padding-top:80px;">
+  <form method="post" action="/login" class="card">
+    <h1 style="text-align:center;">signet 平台登录</h1>
+    <p class="muted">账号由管理员开通，无自助注册；登录后自动进入概况页。</p>
+    <label>用户：<input name="user" required autofocus></label>
+    <label>口令：<input name="password" type="password" required></label>
+    <button class="btn" type="submit">登 录</button>
+    <p class="hint">提示：登录凭据由 operator 开通；会话通过 HttpOnly Cookie 维持。</p>
   </form>
+</div>
 </body>
 </html>
 """
+
+_LOGIN_SHELL = """<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>{title}</title>
+<link rel="stylesheet" href="/static/style.css"></head>
+<body>
+<div class="topbar"><span class="brand">signet</span>
+<nav><a href="/">概况</a><a href="/tasks">任务</a><a href="/requirements">需求</a></nav>
+<span class="user">未登录</span></div>
+<div class="page" style="display:flex;justify-content:center;padding-top:80px;">
+  <div class="card" style="max-width:520px;border:1px solid #e5e7eb;border-radius:10px;padding:20px;">
+    <h1 style="text-align:center;">{heading}</h1>
+    <p class="muted">{message}</p>
+    <p style="text-align:center;"><a href="/login">返回登录页</a></p>
+  </div>
+</div>
+</body>
+</html>
+"""
+
+
+def login_shell_page(title, heading, message):
+    """登录周边页（失败提示等）：与登录页同一居中卡片版式，同样引用样式。"""
+    return _LOGIN_SHELL.format(
+        title=title, heading=heading,
+        message=html.escape(str(message)),
+    )
 
 
 def check_actor_aliases(document):
@@ -287,6 +324,9 @@ def create_app(default_repo=None):
     configured_repo = default_repo or os.environ.get("SIGNET_STATE_REPO")
     authn.ensure_data_dir()
     app = FastAPI(title="signet 平台服务", version="0.3.0")
+    # 统一设计系统静态资源：原型 style.css 固定挂 /static/style.css（AC-01）。
+    app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")),
+              name="static")
 
     def usable_repository(candidate):
         try:
@@ -510,14 +550,10 @@ def create_app(default_repo=None):
         try:
             token = perform_login(user, password)
         except PlatformError as error:
-            page = (
-                "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
-                "<title>signet 登录</title></head><body>"
-                f"<p>登录失败：{error.message}</p>"
-                "<p><a href=\"/login\">返回登录页</a></p>"
-                "</body></html>"
+            return HTMLResponse(
+                login_shell_page("signet 登录", "登录失败", f"登录失败：{error.message}"),
+                status_code=401,
             )
-            return HTMLResponse(page, status_code=401)
         response = RedirectResponse(url="/", status_code=303)
         response.set_cookie(authn.SESSION_COOKIE, token, httponly=True, samesite="lax", path="/")
         return response
