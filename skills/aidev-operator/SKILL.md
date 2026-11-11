@@ -52,6 +52,7 @@ python aidev-agent.py login --user nfsnyy --password '<口令，hints.md/口头�
 ```
 
 - Git Bash 环境变量路径一律 `C:/` 形态（`/c/...` 静默失效）。
+- **单机假设声明（api-remote-ready 落地前）**：`init-repository` / `init-task` / `freeze` / `refreeze` / `sync` 的 `--repo`、`--workspace` 与三件套路径均为**服务端本地路径**——这些动词仅当 CLI 与服务同机（或共享文件系统）时可用；跨机 operator 先 clone 平台仓到本机跑 CLI（ship 本就需要本机工作副本），但上述动词仍受服务端路径解析限制。根治在需求 `api-remote-ready`（REQ-1~3：逻辑标识 + 内容上传 + 客户端拉取）。
 - 8000 常驻服务：`SIGNET_STATE_REPO=<状态仓> SIGNET_PLATFORM_REPO=<平台仓> python -m aidev.web.server --port 8000`（后台）。**平台仓代码变更后必须重启才生效**；服务重启不动账本。
 - commit 身份：`-c user.name='nfsnyy' -c user.email='nfsnyy@signet.local'`；签名约定：H1/H2 双签 nfsnyy（用户对话中明确"签"后代为执行）。
 
