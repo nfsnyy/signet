@@ -52,6 +52,18 @@ def _task_metadata(task_dir):
     return metadata if isinstance(metadata, dict) else {}
 
 
+def task_titles(tasks):
+    """task_id → title 映射：事件流/时间线的人读任务引用（title 缺省为 None，渲染层回落短码）。"""
+    return {record["task_id"]: record.get("title") for record in tasks}
+
+
+def task_events(repository, task_id, limit=200):
+    """单任务事件时间线（新在前）；先全量过滤再截断，避免全局截断吞掉旧任务事件。"""
+    events = [event for event in recent_events(repository, limit=100000)
+              if event.get("task_id") == task_id]
+    return events[:limit]
+
+
 def task_counts(tasks):
     """各状态任务数；各状态之和恒等于任务目录数。"""
     counts = {}
@@ -108,6 +120,7 @@ def project_snapshot(repository):
         "task_total": len(tasks),
         "pending_verification": pending_verification(tasks),
         "recent_events": recent_events(repository),
+        "task_titles": task_titles(tasks),
         "commit": current_head(repository),
     }
 
@@ -262,7 +275,8 @@ def task_detail(repository, task_id):
     """GET /api/tasks/{id} 的 result 负载；任务不存在时返回 None。
 
     负载含 metadata（title/state/owner/requirement/spec_pin）、task.md 正文
-    （body）与钉扎验收卡全文（card，未钉扎为 None）。
+    （body）、钉扎验收卡全文（card，未钉扎为 None）、事件时间线（events，
+    本任务事件新在前）与 task_titles（task_id → title，时间线人读引用）。
     """
     repository = Path(repository)
     path = repository / "tasks" / task_id / "task.md"
@@ -276,4 +290,6 @@ def task_detail(repository, task_id):
     detail["task_id"] = task_id
     detail["body"] = body
     detail["card"] = pinned_acceptance_card(repository, metadata)
+    detail["events"] = task_events(repository, task_id)
+    detail["task_titles"] = task_titles(list_tasks(repository))
     return detail

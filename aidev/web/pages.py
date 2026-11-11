@@ -6,8 +6,88 @@ v1 展原稿：需求正文以 HTML 转义后的原始 markdown 放入 <pre>，�
 """
 
 import html
+from datetime import datetime, timezone
+
+from . import eventcaption
 
 BOARD_COLUMN_ORDER = ("Draft", "Ready", "In Progress", "Implemented", "Verified", "Done", "Blocked", "Void")
+
+
+def _relative_time(iso):
+    """事件流时间：N 分钟/小时/天前（REQ-3 相对化，悬停 title 由调用方给绝对时间）。"""
+    if not iso:
+        return "-"
+    try:
+        stamp = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return str(iso)
+    minutes = int((datetime.now(timezone.utc) - stamp).total_seconds() // 60)
+    if minutes < 1:
+        return "刚刚"
+    if minutes < 60:
+        return f"{minutes} 分钟前"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} 小时前"
+    return f"{hours // 24} 天前"
+
+
+def _compact_time(iso):
+    """时间线时间：MM-DD HH:MM（REQ-3 分流：时间线紧凑绝对，悬停 title 完整绝对）。"""
+    text = str(iso or "")
+    if len(text) >= 16 and text[4] == "-" and text[10] == "T":
+        return f"{text[5:10]} {text[11:16]}"
+    return text or "-"
+
+
+def _linked_caption(event, title, link_tasks):
+    """人读句式 → HTML：任务引用替换成 #短码+标题（概况页带链接，时间线用 span）。"""
+    task_id = str(event.get("task_id") or "")
+    caption = html.escape(eventcaption.describe_event(event, title))
+    if not task_id:
+        return caption
+    short = eventcaption.task_shortcode(task_id)
+    ref_text = html.escape(f"{short} {title}" if title else short)
+    if title:
+        ref_html = ("<a href=\"/tasks/{}\"><span class=\"task-ref\">{}</span>"
+                    " <span class=\"task-title\">{}</span></a>").format(
+            html.escape(task_id), html.escape(short), html.escape(title)) if link_tasks else (
+            "<span class=\"task-ref\">{}</span> <span class=\"task-title\">{}</span>").format(
+            html.escape(short), html.escape(title))
+    else:
+        ref_html = ("<a href=\"/tasks/{}\"><span class=\"task-ref\">{}</span></a>").format(
+            html.escape(task_id), html.escape(short)) if link_tasks else (
+            "<span class=\"task-ref\">{}</span>").format(html.escape(short))
+    return caption.replace(ref_text, ref_html, 1)
+
+
+def _state_chip(event):
+    """状态迁移 chip；驳回/作废类事件用 warn 样式。"""
+    transition = eventcaption.state_transition(event)
+    if not transition:
+        return ""
+    warn = event.get("event_type") in ("task.rejected", "task.void")
+    cls = "chip warn" if warn else "chip state"
+    return f"<span class=\"{cls}\">{html.escape(transition)}</span>"
+
+
+def _feed_item(event, titles, link_tasks, time_text):
+    """单条事件条目：时间（悬停绝对）+ 人读句式（自带 actor）+ 状态 chip（+ 概况页详情入口）。"""
+    title = titles.get(str(event.get("task_id") or ""))
+    caption = _linked_caption(event, title, link_tasks)
+    chip = _state_chip(event)
+    task_id = str(event.get("task_id") or "")
+    more = ""
+    if link_tasks and task_id:
+        more = "<a class=\"feed-more\" href=\"/tasks/{}#timeline\">详情 →</a>".format(html.escape(task_id))
+    return (
+        "<li class=\"feed-item\"><span class=\"feed-time\" title=\"{}\">{}</span>"
+        " <span class=\"feed-body\">{} {} {}</span></li>"
+    ).format(
+        html.escape(str(event.get("timestamp") or "")),
+        html.escape(time_text),
+        caption, chip, more,
+    )
 
 
 def _page(title, body):
@@ -24,20 +104,17 @@ def render_overview(user, snapshot):
         for state, count in snapshot["task_counts"].items()
     )
     pending_items = "".join(
-        "<li><code>{}</code>　{}（owner：{}）</li>".format(
+        "<li><a href=\"/tasks/{}\"><code>{}</code></a>　{}（owner：{}）</li>".format(
+            html.escape(item["task_id"]),
             html.escape(item["task_id"]),
             html.escape(item.get("title") or ""),
             html.escape(item.get("owner") or "-"),
         )
         for item in snapshot["pending_verification"]
     ) or "<li>无</li>"
+    titles = snapshot.get("task_titles") or {}
     event_items = "".join(
-        "<li><code>{}</code>　{}　task={}　actor={}</li>".format(
-            html.escape(str(event.get("timestamp") or "")),
-            html.escape(str(event.get("event_type") or "")),
-            html.escape(str(event.get("task_id") or "-")),
-            html.escape(str(event.get("actor") or "")),
-        )
+        _feed_item(event, titles, link_tasks=True, time_text=_relative_time(event.get("timestamp")))
         for event in snapshot["recent_events"]
     ) or "<li>无</li>"
     project = snapshot.get("project") or {}
@@ -56,7 +133,9 @@ def render_overview(user, snapshot):
         f"<h2>任务计数</h2><ul>{counts_items}</ul>"
         f"{meta}"
         f"<h2>待验收（Implemented）</h2><ul>{pending_items}</ul>"
-        f"<h2>最近事件</h2><ul>{event_items}</ul>"
+        f"<h2>最近事件</h2><ul class=\"feed\">{event_items}</ul>"
+        "<p class=\"muted\">最近事件仅放人读摘要；完整故事（报告 / 判据 / commit / 理由）"
+        "见任务详情页的事件时间线。</p>"
         "<nav><a href=\"/tasks\">任务看板</a>　<a href=\"/tasks/new\">新建任务</a>　<a href=\"/requirements\">需求列表</a></nav>"
     )
     return _page("signet 概况", body)
@@ -212,6 +291,52 @@ def _handbook_block(task_id):
     )
 
 
+def _timeline_block(detail):
+    """事件时间线（AC-05）：一行摘要 + details/summary 展开结构化负载。
+
+    时间线内任务引用用 span（本页即详情，直链由概况页负责），展开区为字段化
+    表格，裸 JSON 不上页面；悬停 title 一律完整绝对时间（REQ-3）。
+    """
+    events = detail.get("events") or []
+    titles = detail.get("task_titles") or {}
+    heading = "<h2 id=\"timeline\">事件时间线</h2>"
+    if not events:
+        return heading + "<p class=\"muted\">（暂无事件）</p>"
+    items = "".join(
+        _timeline_item(event, titles)
+        for event in events
+    )
+    return heading + "<ul class=\"feed\">" + items + "</ul>"
+
+
+def _timeline_item(event, titles):
+    title = titles.get(str(event.get("task_id") or ""))
+    summary = "{} {}".format(
+        _linked_caption(event, title, link_tasks=False),
+        _state_chip(event),
+    )
+    rows = eventcaption.event_detail_rows(event)
+    if rows:
+        table = "".join(
+            "<tr><td>{}</td><td>{}</td></tr>".format(html.escape(str(label)), html.escape(str(value)))
+            for label, value in rows
+        )
+        body = (
+            "<details><summary>{}</summary><div class=\"feed-detail\">"
+            "<table><tr><th>字段</th><th>内容</th></tr>{}</table></div></details>"
+        ).format(summary, table)
+    else:
+        body = summary
+    return (
+        "<li class=\"feed-item\"><span class=\"feed-time\" title=\"{}\">{}</span>"
+        " <span class=\"feed-body\">{}</span></li>"
+    ).format(
+        html.escape(str(event.get("timestamp") or "")),
+        html.escape(_compact_time(event.get("timestamp"))),
+        body,
+    )
+
+
 def render_task_detail(user, detail):
     """任务详情页：metadata、task.md 原稿、钉扎验收卡全文；Implemented 附交接卡。"""
     task_id = html.escape(str(detail.get("task_id") or ""))
@@ -250,6 +375,7 @@ def render_task_detail(user, detail):
     handbook = _handbook_block(detail.get("task_id")) if detail.get("state") == "Implemented" else ""
     handbook_tldr = _handbook_tldr() if detail.get("state") == "Implemented" else ""
     dispatch = _dispatch_block(detail.get("task_id")) if detail.get("state") in ("Draft", "Ready") else ""
+    timeline_block = _timeline_block(detail)
     body = (
         handbook_tldr
         + "<h1>{}（<code>{}</code>）</h1>".format(
@@ -260,6 +386,7 @@ def render_task_detail(user, detail):
         + card_block
         + dispatch
         + handbook
+        + timeline_block
         + "<p>当前登录用户：<strong>{}</strong></p>".format(html.escape(user))
         + "<nav><a href=\"/tasks\">返回任务看板</a>　<a href=\"/\">返回概况</a></nav>"
     )
