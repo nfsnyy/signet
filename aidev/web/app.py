@@ -22,12 +22,15 @@ from ..service import (
     claim,
     claim_authoritative,
     claim_with_sigt,
+    closeout_requirement,
     confirm_requirement,
     create_requirement,
     enhancement,
     evidence_manifest,
     init_repository,
     init_task,
+    merge_backlog_item,
+    normalize_req_items,
     record_pat_event,
     resolve_spec_asset,
     status,
@@ -197,6 +200,7 @@ class InitTaskBody(ActorValidatingModel):
     requirement: str
     owner: str | None = None
     actor: str | None = None
+    req_items: list | None = None
 
 
 class SyncBody(ActorValidatingModel):
@@ -260,11 +264,18 @@ class RequirementCreateBody(BaseModel):
     title: str
     body: str | None = None
     entries: list = []
+    source: str | None = None
 
 
 class RequirementUpdateBody(BaseModel):
     body: str | None = None
     entries: list = []
+    source: str | None = None
+
+
+class MergeBody(BaseModel):
+    backlog_task_id: str
+    entry_id: str
 
 
 class ConfirmBody(BaseModel):
@@ -647,20 +658,37 @@ def create_app(default_repo=None):
         actor, on_behalf_of = _requirement_attribution(request)
         _pat_scope_required(request, "requirement:create")
         return ok(create_requirement(
-            resolve_repo(None), body.requirement_id, body.title, body.body, body.entries, actor, on_behalf_of))
+            resolve_repo(None), body.requirement_id, body.title, body.body, body.entries, actor, on_behalf_of,
+            source=body.source))
 
     @app.post("/api/requirements/{requirement_id}")
     def requirement_update_endpoint(request: Request, requirement_id: str, body: RequirementUpdateBody):
         actor, on_behalf_of = _requirement_attribution(request)
         _pat_scope_required(request, "requirement:update")
         return ok(update_requirement(
-            resolve_repo(None), requirement_id, body.body, body.entries, actor, on_behalf_of))
+            resolve_repo(None), requirement_id, body.body, body.entries, actor, on_behalf_of,
+            source=body.source))
 
     @app.post("/api/requirements/{requirement_id}/submission")
     def requirement_submit_endpoint(request: Request, requirement_id: str, body: ConfirmBody | None = None):
         actor, on_behalf_of = _requirement_attribution(request)
         _pat_scope_required(request, "requirement:submit")
         return ok(submit_requirement(resolve_repo(None), requirement_id, actor, on_behalf_of))
+
+    @app.post("/api/requirements/{requirement_id}/closeout")
+    def requirement_closeout_endpoint(request: Request, requirement_id: str):
+        context = credentials(request)
+        if context["kind"] != "user":
+            raise AuthorizationError("authz.session_required", "需求收口只认本人交互登录，任何凭证不可代过")
+        return ok(closeout_requirement(resolve_repo(None), requirement_id, context["actor"]))
+
+    @app.post("/api/requirements/{requirement_id}/backlog-merge")
+    def requirement_backlog_merge_endpoint(request: Request, requirement_id: str, body: MergeBody):
+        context = credentials(request)
+        if context["kind"] != "user":
+            raise AuthorizationError("authz.session_required", "backlog 归并只认本人交互登录，任何凭证不可代过")
+        return ok(merge_backlog_item(
+            resolve_repo(None), requirement_id, body.backlog_task_id, body.entry_id, context["actor"]))
 
     @app.post("/api/requirements/{requirement_id}/confirm")
     async def requirement_confirm_endpoint(request: Request, requirement_id: str):
@@ -732,13 +760,16 @@ def create_app(default_repo=None):
         form = await request.form()
         title = str(form.get("title") or "").strip()
         requirement = str(form.get("requirement") or "").strip()
+        req_items = normalize_req_items(str(form.get("req_items") or "").replace("，", ",").split(","))
         if not title or not requirement:
             raise PlatformError("request.invalid", "title and requirement are required and must be non-empty")
-        # T9 派生闸门（AC-05）：页面表单与 cookie API 同一条校验路径——需求须存在且 confirmed。
+        # T9 派生闸门（AC-05）+ T10 条目引用校验（AC-01）：页面表单与 cookie API
+        # 同一条校验路径——需求须存在且 confirmed，承载条目编号须命中「判据条目」节。
         validate_requirement_derive(resolve_repo(None), requirement)
         # 与 POST /api/tasks 同一条创建路径：owner 锁定为登录用户，workspace 平台生成。
         workspace = str(Path(tempfile.gettempdir()) / new_id("signet-ws"))
-        result = init_task(resolve_repo(None), workspace, title, requirement, session["user"], session["user"])
+        result = init_task(resolve_repo(None), workspace, title, requirement, session["user"], session["user"],
+                           req_items=req_items)
         return RedirectResponse(url="/tasks/{}".format(result["task_id"]), status_code=303)
 
     @app.get("/tasks/{task_id}")
@@ -923,14 +954,18 @@ def create_app(default_repo=None):
             raise PlatformError("request.invalid", "title and requirement are required and must be non-empty")
         # T9 派生闸门（AC-05）：交互会话（cookie，页面同源动线）派生须需求存在且 confirmed；
         # operator CLI（Bearer 用户令牌）保留自由引用，兼容 T1–T8 既有工作流与基线测试。
+        # T10 条目引用校验（AC-01）同口径：仅会话路径校验 req_items 命中「判据条目」节。
         context = credentials(request)
-        if context["kind"] == "user" and context.get("via") == "cookie":
+        session_path = context["kind"] == "user" and context.get("via") == "cookie"
+        if session_path:
             validate_requirement_derive(resolve_repo(None), requirement)
         # 身份锁定（T2 AC-09 语义）：owner 与事件归因均以凭据身份为准，请求体所填 owner 被会话覆盖。
         actor = request_actor(request)
         # 页面建任务：workspace 由服务端生成标识；显式传入（CLI/编排）时原样使用。
         workspace = (body.workspace or "").strip() or str(Path(tempfile.gettempdir()) / new_id("signet-ws"))
-        return ok(init_task(resolve_repo(body.repo), workspace, title, requirement, actor, actor))
+        return ok(init_task(
+            resolve_repo(body.repo), workspace, title, requirement, actor, actor,
+            req_items=body.req_items, validate_req_items=session_path))
 
     @app.post("/api/tasks/{task_id}/freeze")
     def freeze_endpoint(

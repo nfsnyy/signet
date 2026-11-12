@@ -11,7 +11,7 @@ describe_event：把一条账本事件映射为一句中文人话——谁 + 做
 
 import re
 
-EVENT_TYPE_COVERAGE = 28  # 覆盖集规模（T7 夹具 22 + T9 requirement.*/pat.* 6）
+EVENT_TYPE_COVERAGE = 30  # 覆盖集规模（T7 夹具 22 + T9 requirement.*/pat.* 6 + T10 closed/merged 2）
 
 _UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
 
@@ -149,6 +149,17 @@ def describe_event(event, title=None):
                 f"（执行者 {payload.get('obo') or '-'}，{scope_count} 项授权）")
     if etype == "pat.revoked":
         return f"{actor} 吊销起草令牌 {payload.get('pat_id') or '-'}，该令牌立即失效"
+
+    # T10 需求收口与 backlog 归并：人读句带需求条目锚点链接，不退化为裸 event_type。
+    if etype == "requirement.closed":
+        entries = payload.get("entries") or []
+        return (f"{actor} 收口需求 {payload.get('requirement_id') or '-'}"
+                f"（{len(entries)} 项判据条目全部覆盖，确认人 {payload.get('confirmed_by') or '-'}）")
+    if etype == "requirement.merged":
+        requirement_id = str(payload.get("requirement_id") or "-")
+        entry_id = str(payload.get("entry_id") or "-")
+        return (f"{actor} 将 backlog 任务 {task_shortcode(payload.get('backlog_task_id'))} 的线索归并到"
+                f" 需求 {requirement_id} 的条目 /requirements/{requirement_id}#entry-{entry_id}")
 
     # 兜底：覆盖集之外的新事件类型——人读句，绝不退化为裸 event_type。
     if ref:

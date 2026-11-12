@@ -45,6 +45,8 @@ th { background: var(--bg-soft); font-weight: 600; font-size: 13px; }
 .badge.implemented { background: #ffedd5; color: #c2410c; }
 .badge.done { background: #dcfce7; color: #15803d; }
 .badge.void { background: #fee2e2; color: #b91c1c; }
+.badge.closed { background: #e5e7eb; color: #4b5563; border: 1px dashed var(--line); }
+.badge.merged { background: #f5f3ff; color: #6d28d9; border: 1px solid var(--line); text-decoration: none; }
 
 .board { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
 .board-col h3 { font-size: 13px; color: var(--muted); margin-bottom: 8px; padding-bottom: 6px; border-bottom: 2px solid var(--line); }

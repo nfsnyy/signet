@@ -33,6 +33,11 @@ _BADGE_CLASSES = {
 
 _REQ_STATUS_CLASSES = {
     "draft": "draft", "submitted": "progress", "confirmed": "done", "accepted": "done",
+    "closed": "closed",
+}
+
+_ENTRY_STATUS_CLASSES = {
+    "草案": "draft", "已确认": "ready", "已派生": "progress", "已覆盖": "done",
 }
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
@@ -154,6 +159,15 @@ def _req_status_badge(status):
     """需求状态徽标（T9 列表状态徽标）：未知状态退化为纯文本。"""
     text = str(status or "-")
     cls = _REQ_STATUS_CLASSES.get(text)
+    if cls is None:
+        return html.escape(text)
+    return f"<span class=\"badge {cls}\">{html.escape(text)}</span>"
+
+
+def _entry_status_badge(status):
+    """条目状态推导徽标（AC-03 口径）：草案 / 已确认 / 已派生 / 已覆盖。"""
+    text = str(status or "-")
+    cls = _ENTRY_STATUS_CLASSES.get(text)
     if cls is None:
         return html.escape(text)
     return f"<span class=\"badge {cls}\">{html.escape(text)}</span>"
@@ -296,13 +310,14 @@ def render_overview(user, snapshot):
 def render_requirements(user, entries):
     cards = "".join(
         "<div class=\"task-card\"><div class=\"title\"><a href=\"/requirements/{}\">{}</a></div>"
-        "<div class=\"meta\"><code>{}</code>　状态 {}　优先级 {}　owner {}　进度 {:.0%}　任务 {}</div></div>".format(
+        "<div class=\"meta\"><code>{}</code>　状态 {}　优先级 {}　owner {}　来源 {}　进度 {:.0%}　任务 {}</div></div>".format(
             html.escape(entry["requirement_id"]),
             html.escape(entry.get("title") or ""),
             html.escape(entry["requirement_id"]),
             _req_status_badge(entry.get("status")),
             html.escape(entry.get("priority") or "-"),
             html.escape(entry.get("owner") or "-"),
+            html.escape(entry.get("source") or "-"),
             entry.get("progress") or 0,
             entry.get("task_count", 0),
         )
@@ -510,10 +525,13 @@ def render_task_detail(user, detail):
     task_id = str(detail.get("task_id") or "")
     state = str(detail.get("state") or "-")
     requirement = str(detail.get("requirement") or "-")
+    req_items = [str(item) for item in (detail.get("req_items") or [])]
+    req_items_text = "、".join("<code>{}</code>".format(html.escape(item)) for item in req_items) or "无"
     meta = (
         "<section class=\"op-area\"><h3>任务信息</h3>"
         "<p>状态：{badge}　owner：{owner}　requirement："
         "<a href=\"/requirements/{requirement}\"><code>{requirement}</code></a></p>"
+        "<p>承载条目：{req_items}</p>"
         "<p>{lease}</p>"
         "<p>钉扎版本：{pin}</p>"
         "<p>创建：{created}　更新：{updated}</p></section>"
@@ -521,6 +539,7 @@ def render_task_detail(user, detail):
         badge=_state_badge(state),
         owner=html.escape(str(detail.get("owner") or "-")),
         requirement=html.escape(requirement),
+        req_items=req_items_text,
         lease=_lease_text(detail.get("lease")),
         pin=_pin_version_text(detail.get("spec_pin")),
         created=html.escape(str(detail.get("created_at") or "-")),
@@ -549,82 +568,115 @@ def render_task_detail(user, detail):
 
 
 def render_task_form(user, requirement=None):
-    """页面建任务表单：owner 由会话锁定，workspace 由平台生成。"""
+    """页面建任务表单：owner 由会话锁定，workspace 由平台生成；可携带承载条目编号。"""
     requirement_value = html.escape(requirement or "")
     body = (
         "<h1>新建任务</h1>"
         "<p class=\"muted\">填写标题与需求标识；owner 自动取当前登录用户（身份锁定，不可指定），"
-        "workspace 由平台生成标识。</p>"
+        "workspace 由平台生成标识。承载条目可选：编号须命中已确认需求的「判据条目」节。</p>"
         "<form method=\"post\" action=\"/tasks\" class=\"card\">"
         "<label>标题：<input name=\"title\" required></label>"
         "<label>需求：<input name=\"requirement\" value=\"{}\" required></label>".format(requirement_value)
-        + "<button class=\"btn\" type=\"submit\">创建任务</button>"
+        + "<label>承载条目（可空，逗号分隔）：<input name=\"req_items\" placeholder=\"REQ-1, REQ-3\"></label>"
+        "<button class=\"btn\" type=\"submit\">创建任务</button>"
         "<p class=\"hint\">创建成功后自动跳转到任务详情页。</p>"
         "</form>"
     )
     return _page("signet 新建任务", user, "tasks", body)
 
 
-def _entry_derived_status(requirement_status, task_count, progress):
-    """条目状态推导：无独立状态机，由「需求确认状态 + 承载任务状态」推导。"""
-    if requirement_status != "confirmed":
-        return "草案"
-    if progress is not None and progress >= 1:
-        return "已覆盖"
-    if task_count:
-        return "已派生"
-    return "已确认"
+def _entry_trace_cell(entry_id, carriers, merges):
+    """合一表「内容」列：条目原文 + 条目反查（承载任务链接与 AC 编号）+ 归并徽标。"""
+    text = html.escape(str(carriers.get("text") or ""))
+    trace = ""
+    tasks = carriers.get("tasks") or []
+    if tasks:
+        links = " ".join(
+            "<a href=\"/tasks/{tid}\">{short}</a>（{acs}）".format(
+                tid=html.escape(str(item.get("task_id") or "")),
+                short=html.escape(eventcaption.task_shortcode(item.get("task_id"))),
+                acs=html.escape(", ".join(str(ac) for ac in (item.get("ac_ids") or [])) or "无 AC 锚点"),
+            )
+            for item in tasks
+        )
+        trace = "<span class=\"entry-trace\">{}</span>".format(links)
+    else:
+        trace = "<span class=\"entry-trace muted\">无承载任务</span>"
+    merge_badges = "".join(
+        "<a class=\"badge merged\" href=\"/tasks/{tid}\">归并自 {short}</a>".format(
+            tid=html.escape(str(backlog_task_id)),
+            short=html.escape(eventcaption.task_shortcode(backlog_task_id)),
+        )
+        for backlog_task_id in (merges.get(entry_id) or [])
+        if backlog_task_id
+    )
+    return text + trace + merge_badges
+
+
+def _entry_table_rows(detail, selectable):
+    """合一表数据行：编号 / 内容（含反查与归并）/ 状态徽标 / 操作（可勾选或只读）。"""
+    merges = detail.get("merges") or {}
+    rows = []
+    for item in (detail.get("entries_trace") or []):
+        entry_id = str(item.get("id") or "")
+        if selectable:
+            operation = (
+                "<input type=\"checkbox\" name=\"entries\" value=\"{}\" checked>".format(html.escape(entry_id))
+            )
+        else:
+            operation = "—"
+        rows.append(
+            "<tr id=\"entry-{eid}\"><td><code>{eid}</code></td>"
+            "<td>{content}</td><td>{status}</td><td>{operation}</td></tr>".format(
+                eid=html.escape(entry_id),
+                content=_entry_trace_cell(entry_id, item, merges),
+                status=_entry_status_badge(item.get("status")),
+                operation=operation,
+            )
+        )
+    return "".join(rows) or "<tr><td colspan=\"4\">（无判据条目）</td></tr>"
 
 
 def render_requirement_detail(user, detail):
+    """需求详情页：元信息 + 正文 + 合一判据条目表（#7）+ 关联任务。
+
+    条目区三列表合一——判据条目 / 条目状态推导 / 逐条确认并入单表
+    （<table class="entry-table">，表头恰 编号/内容/状态/操作 四列）：
+    行内状态列为推导徽标（AC-03 口径），submitted 态操作列渲染默认勾选的
+    确认 checkbox（表单 action 指向 confirm 端点，全量清单一交提交），
+    其余状态操作列只读；条目反查（AC-02）与归并留痕（AC-06）同行呈现。
+    """
     requirement_id = str(detail.get("requirement_id") or "")
     status = str(detail.get("status") or "-")
-    entries = [str(item) for item in (detail.get("entries") or [])]
     task_items = "".join(
         "<li><a href=\"/tasks/{}\"><code>{}</code></a></li>".format(
             html.escape(task_id), html.escape(task_id))
         for task_id in detail["tasks"]
     ) or "<li>无关联任务</li>"
-    derivation_rows = "".join(
-        "<tr><td><code>{}</code></td><td>{}</td></tr>".format(
-            html.escape(entry_id),
-            html.escape(_entry_derived_status(detail.get("status"), len(detail["tasks"]), detail.get("progress"))),
-        )
-        for entry_id in entries
-    )
-    derivation_block = (
-        "<h2>条目状态推导</h2>"
-        "<p class=\"muted\">条目不设独立状态机：草案 / 已确认 / 已派生 / 已覆盖"
-        " 由「需求确认状态 + 承载任务状态」推导展示。</p>"
-        "<table><tr><th>条目</th><th>推导状态</th></tr>{}</table>".format(derivation_rows or "<tr><td colspan=\"2\">（无判据条目）</td></tr>")
-    )
-    if status == "submitted" and entries:
-        checklist = "".join(
-            "<label><input type=\"checkbox\" name=\"entries\" value=\"{}\" checked> {}</label>".format(
-                html.escape(entry_id), html.escape(entry_id))
-            for entry_id in entries
-        )
-        confirm_block = (
-            "<h2>逐条确认（confirm）</h2>"
-            "<p class=\"muted\">本人登录逐项核对后一次提交全量清单；清单与当前条目集合"
-            "完全一致才会生效（缺条 / 多条 / 编号不存在一律拒绝）。</p>"
-            "<form method=\"post\" action=\"/api/requirements/{}/confirm\" class=\"card\">{}"
-            "<button class=\"btn\" type=\"submit\">确认全部条目</button></form>"
-        ).format(html.escape(requirement_id), checklist)
-    elif status == "confirmed":
-        confirm_block = "<h2>逐条确认（confirm）</h2><p class=\"muted\">本需求已确认，条目清单锁定；修订请直改文件走 git 留痕。</p>"
+    selectable = status == "submitted" and bool(detail.get("entries_trace"))
+    table_rows = _entry_table_rows(detail, selectable)
+    if selectable:
+        entry_table = (
+            "<form method=\"post\" action=\"/api/requirements/{}/confirm\">"
+            "<table class=\"entry-table\"><tr><th>编号</th><th>内容</th><th>状态</th><th>操作</th></tr>"
+            "{}</table>"
+            "<p><button class=\"btn\" type=\"submit\">确认全部条目</button>"
+            "<span class=\"muted\">　本人登录逐项核对后一次提交全量清单；清单与当前条目集合"
+            "完全一致才会生效（缺条 / 多条 / 编号不存在一律拒绝）。</span></p></form>"
+        ).format(html.escape(requirement_id), table_rows)
     else:
-        confirm_block = (
-            "<h2>逐条确认（confirm）</h2>"
-            "<p class=\"muted\">需求当前状态 {}，提交（submit）后方可逐条确认。</p>".format(html.escape(status))
+        entry_table = (
+            "<table class=\"entry-table\"><tr><th>编号</th><th>内容</th><th>状态</th><th>操作</th></tr>"
+            "{}</table>".format(table_rows)
         )
     body = (
         "<h1>{}（<code>{}</code>）</h1>".format(
             html.escape(detail.get("title") or ""), html.escape(requirement_id))
-        + "<p class=\"muted\">状态：{}　优先级：{}　owner：{}　进度：{:.0%}　关联任务：{} 个</p>".format(
+        + "<p class=\"muted\">状态：{}　优先级：{}　owner：{}　来源：{}　进度：{:.0%}　关联任务：{} 个</p>".format(
             _req_status_badge(detail.get("status")),
             html.escape(detail.get("priority") or "-"),
             html.escape(detail.get("owner") or "-"),
+            html.escape(detail.get("source") or "-"),
             detail.get("progress") or 0,
             len(detail["tasks"]),
         )
@@ -632,8 +684,8 @@ def render_requirement_detail(user, detail):
             html.escape(requirement_id), html.escape(requirement_id))
         + "<h2>正文</h2>"
         + _render_document(detail["body"])
-        + derivation_block
-        + confirm_block
+        + "<h2>判据条目</h2>"
+        + entry_table
         + "<h2>关联任务</h2><ul class=\"related-tasks\">{}</ul>".format(task_items)
     )
     return _page("signet 需求详情", user, "requirements", body)
