@@ -9,8 +9,9 @@ from .domain import REFREEZABLE_STATES, SPEC_FILES, event_path, make_event, reso
 from .errors import OperationalError, PlatformError
 from .gitrepo import commit_paths, ensure_repository
 from .jsonio import append_jsonl, sha256_file, utc_now, write_json
+from .readmodel import parse_requirement_text
 from .runner import execute_contract_cases
-from .service import propagate_pin_invalidation, stamp_events
+from .service import propagate_pin_invalidation, requirement_entries, stamp_events
 from .taskfile import read_task, write_task
 from .vetoes import approved_veto_for, classify_refreeze, latest_vetoes, veto_log_path
 
@@ -269,6 +270,46 @@ def validate_three_piece(card, contract, mapping, operation_source, contract_fil
         raise PlatformError("c4.invalid_contract_type", "contract_type must be baseline or target")
 
 
+def validate_traceability(repository, metadata, card):
+    """C6 追溯对账（门禁②③）：AC↔判据条目逐锚点命中且需求 confirmed。
+
+    位置：validate_three_piece 之后、规格目录写盘之前——任一脱节即整次拒绝
+    （不写规格目录、不改任务状态、不落 freeze 事件）。引用为自由文本（需求
+    账本无此文件，T1–T8 既有任务）时不 engage；T9 起建任务由派生闸门把关。
+    """
+    requirement_id = metadata.get("requirement")
+    if not requirement_id:
+        return
+    requirement_path = Path(repository) / "requirements" / requirement_id / "requirement.md"
+    if not requirement_path.is_file():
+        return
+    gaps = []
+    fields, body = {}, ""
+    try:
+        fields, body = parse_requirement_text(requirement_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        gaps.append(f"需求 {requirement_id} 文件缺失或无法解析")
+    status = fields.get("status")
+    if status != "confirmed":
+        gaps.append(f"需求 {requirement_id} 未确认（status={status or '-'}，须 confirmed）")
+    entry_ids = {item["id"] for item in requirement_entries(body)}
+    for criterion in card.get("criteria") or []:
+        criterion_id = criterion.get("criterion_id") or "-"
+        anchors = criterion.get("reqs")
+        if not anchors:
+            gaps.append(f"{criterion_id} 无 reqs 锚点")
+            continue
+        for anchor in anchors:
+            if anchor not in entry_ids:
+                gaps.append(f"{criterion_id} 锚点 {anchor} 未命中需求「判据条目」条目")
+    if gaps:
+        raise PlatformError(
+            "c6.traceability_mismatch",
+            "AC↔条目追溯对账未通过，冻结被拒绝（零副作用）",
+            details={"requirement_id": requirement_id, "gaps": gaps},
+        )
+
+
 def write_baseline_evidence(spec_directory, case_results):
     evidence_directory = Path(spec_directory) / "baseline-evidence"
     evidence_directory.mkdir(parents=True, exist_ok=True)
@@ -360,6 +401,7 @@ def freeze_task(repository, task_id, workspace, card_file, contract_file, mappin
         contract = read_json_document(contract_file, "c2.invalid_contract")
         mapping = read_json_document(mapping_file, "c1.invalid_mapping")
         validate_three_piece(card, contract, mapping, operation_source, contract_file)
+        validate_traceability(repository, metadata, card)
         spec_directory.mkdir(parents=True)
         sources = {
             "acceptance_card": Path(card_file),

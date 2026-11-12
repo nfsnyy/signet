@@ -11,7 +11,7 @@ describe_event：把一条账本事件映射为一句中文人话——谁 + 做
 
 import re
 
-EVENT_TYPE_COVERAGE = 22  # 覆盖集规模（夹具 FIXTURE_EVENTS 条数）
+EVENT_TYPE_COVERAGE = 28  # 覆盖集规模（T7 夹具 22 + T9 requirement.*/pat.* 6）
 
 _UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
 
@@ -131,6 +131,24 @@ def describe_event(event, title=None):
         return f"{actor} 登记改进点「{payload.get('title') or '-'}」"
     if etype == "discussion.opened":
         return f"{actor} 发起讨论「{payload.get('topic') or '-'}」：{payload.get('reason') or '-'}"
+
+    # T9 需求起草流：requirement.*/pat.* 六类事件的覆盖集人读句。
+    if etype == "requirement.created":
+        title = payload.get("title") or "-"
+        return f"{actor} 起草需求「{title}」（{payload.get('requirement_id') or '-'}，状态 draft）"
+    if etype == "requirement.updated":
+        return f"{actor} 修订需求 {payload.get('requirement_id') or '-'} 的正文与判据条目"
+    if etype == "requirement.submitted":
+        return f"{actor} 提交需求 {payload.get('requirement_id') or '-'}，提请确认"
+    if etype == "requirement.confirmed":
+        entries = payload.get("entries") or []
+        return f"{actor} 确认需求 {payload.get('requirement_id') or '-'}（逐条勾选 {len(entries)} 项，全部生效）"
+    if etype == "pat.issued":
+        scope_count = len(payload.get("scope") or [])
+        return (f"{actor} 签发起草令牌 {payload.get('pat_id') or '-'}"
+                f"（执行者 {payload.get('obo') or '-'}，{scope_count} 项授权）")
+    if etype == "pat.revoked":
+        return f"{actor} 吊销起草令牌 {payload.get('pat_id') or '-'}，该令牌立即失效"
 
     # 兜底：覆盖集之外的新事件类型——人读句，绝不退化为裸 event_type。
     if ref:

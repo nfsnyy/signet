@@ -22,16 +22,22 @@ from ..service import (
     claim,
     claim_authoritative,
     claim_with_sigt,
+    confirm_requirement,
+    create_requirement,
     enhancement,
     evidence_manifest,
     init_repository,
     init_task,
+    record_pat_event,
     resolve_spec_asset,
     status,
     submit,
     submit_authoritative,
+    submit_requirement,
     synchronize,
     task_log,
+    update_requirement,
+    validate_requirement_derive,
 )
 from . import pages
 from ..specs import freeze_task, refreeze_task
@@ -243,6 +249,28 @@ class AdjudicateBody(ActorValidatingModel):
     push: bool = False
 
 
+class PatIssueBody(BaseModel):
+    label: str
+    scope: list
+    expires_in: str
+
+
+class RequirementCreateBody(BaseModel):
+    requirement_id: str
+    title: str
+    body: str | None = None
+    entries: list = []
+
+
+class RequirementUpdateBody(BaseModel):
+    body: str | None = None
+    entries: list = []
+
+
+class ConfirmBody(BaseModel):
+    entries: list = []
+
+
 def save_upload(upload, directory, fallback_name):
     if upload is None:
         return None
@@ -274,22 +302,62 @@ def materialize_assets(uploads, manifest, temporary):
 
 
 def authenticate_header(authorization):
+    """凭据解析：Bearer 会话 / Bearer PAT / sigt。
+
+    返回 (context, error)：error 为 (status_code, payload)（PAT 过期/吊销的
+    专属 401）或 None。Bearer 值带 pat- 前缀时按 PAT 校验（签名 → 过期 →
+    吊销），与 sigt 同构的能力令牌面。
+    """
     if not authorization:
-        return None
+        return None, None
     scheme, _, value = authorization.partition(" ")
     scheme = scheme.strip().lower()
     value = value.strip()
     if scheme == "bearer" and value:
+        if value.startswith(authn.PAT_PREFIX):
+            payload = authn.verify_pat(value)
+            if payload is None:
+                return None, (401, error_payload("auth.required", "PAT signature is invalid"))
+            if authn.pat_is_expired(payload):
+                return None, (401, error_payload("auth.pat_expired", "PAT has expired"))
+            record = authn.find_pat_by_token(value)
+            if record is not None and record.get("status") == "revoked":
+                return None, (401, error_payload("auth.pat_revoked", "PAT has been revoked"))
+            context = {
+                "kind": "pat",
+                "actor": payload["user"],
+                "obo": payload.get("obo") or payload["user"],
+                "scope": list(payload.get("scope") or []),
+                "token": value,
+                "via": "bearer",
+            }
+            return context, None
         session = authn.find_session(value)
         if session:
-            return {"kind": "user", "actor": session["user"], "task": None}
-        return None
+            return {"kind": "user", "actor": session["user"], "task": None, "via": "bearer"}, None
+        return None, None
     if scheme == "sigt" and value:
         payload = authn.verify_sigt(value)
         if payload is not None:
-            return {"kind": "sigt", "actor": payload["actor"], "task": payload["task"]}
-        return None
-    return None
+            return {"kind": "sigt", "actor": payload["actor"], "task": payload["task"], "via": "sigt"}, None
+        return None, None
+    return None, None
+
+
+def pat_path_allowed(method, path):
+    """PAT 接口隔离（AC-02）：仅需求起草三动词端点可达。
+
+    POST /api/requirements（create）、POST /api/requirements/{id}（update）、
+    POST /api/requirements/{id}/submission（submit）；confirm 与其余一律 403。
+    """
+    if method != "POST":
+        return False
+    if path == "/api/requirements":
+        return True
+    if not path.startswith("/api/requirements/"):
+        return False
+    parts = [part for part in path[len("/api/requirements/"):].split("/") if part]
+    return len(parts) == 1 or (len(parts) == 2 and parts[1] == "submission")
 
 
 def credentials(request):
@@ -414,19 +482,30 @@ def create_app(default_repo=None):
                 parts = tuple(part for part in rest.split("/") if part)
                 if parts[1:] in PUBLIC_TASK_READ_SUFFIXES and parts[0]:
                     return await call_next(request)
-            context = authenticate_header(request.headers.get("Authorization"))
+            context, auth_error = authenticate_header(request.headers.get("Authorization"))
+            if auth_error is not None:
+                status_code, payload = auth_error
+                return JSONResponse(status_code=status_code, content=payload)
             if context is None:
                 # 页面会话 cookie 同样是有效凭据：读端点要支持浏览器直接访问
                 # （AC-01：带有效会话 cookie 返回 200 JSON）。
                 cookie_token = request.cookies.get(authn.SESSION_COOKIE)
                 cookie_session = authn.find_session(cookie_token) if cookie_token else None
                 if cookie_session:
-                    context = {"kind": "user", "actor": cookie_session["user"], "task": None}
+                    context = {"kind": "user", "actor": cookie_session["user"], "task": None, "via": "cookie"}
             if context is None:
                 return JSONResponse(
                     status_code=401,
                     content=error_payload("auth.required", "valid credentials are required for this endpoint"),
                 )
+            if context["kind"] == "pat":
+                # PAT 接口隔离：confirm/operator 域/sigt 交叉全 403，过期/吊销 401 已在上游拦截。
+                if not pat_path_allowed(request.method, path):
+                    return JSONResponse(
+                        status_code=403,
+                        content=error_payload("authz.pat_scope_denied", "PAT 仅可用于需求起草动词端点（create/update/submit），其余端点一律拒绝"),
+                    )
+                authn.touch_pat(context["token"])
             if context["kind"] == "sigt":
                 operator_domain, token_task = path_authorization(request.method, path)
                 if operator_domain:
@@ -466,6 +545,144 @@ def create_app(default_repo=None):
         if detail is None:
             raise PlatformError("requirement.not_found", f"requirement does not exist: {requirement_id}")
         return ok(detail)
+
+    # ------------------------------------------------------------------
+    # T9 需求起草流：settings 签发面 + PAT 生命周期 + 需求动词 + confirm。
+    # ------------------------------------------------------------------
+
+    def _issue_pat(repository, user, label, scope, expires_in):
+        """签发 PAT：平台侧只存散列+元数据，完整令牌仅当次响应回显一次。"""
+        label = (label or "").strip()
+        if not label:
+            raise PlatformError("pat.label_required", "label（执行者标签）必填，归属落账用")
+        validate_actor_alias(label)
+        expires_at = authn.pat_expires_at(expires_in)  # 先校验档位（无效请求零痕迹）
+        cleaned = []
+        for item in scope or []:
+            if item not in authn.PAT_SCOPES:
+                raise PlatformError("pat.invalid_scope", f"scope is not issuable: {item}")
+            if item not in cleaned:
+                cleaned.append(item)
+        if not cleaned:
+            raise PlatformError("pat.invalid_scope", "at least one issuable scope must be granted")
+        token = authn.mint_pat(user, cleaned, label, expires_at)
+        record = authn.register_pat(user, label, cleaned, label, expires_in, token)
+        record_pat_event(repository, "pat.issued", user, {
+            "pat_id": record["pat_id"],
+            "label": record["label"],
+            "obo": label,
+            "scope": cleaned,
+            "expires_at": record["expires_at"],
+        })
+        return record, token
+
+    def _requirement_attribution(request):
+        """需求动词归因：PAT → actor=签发人 / on_behalf_of=执行者标签；本人会话 → 双字段=登录人。"""
+        context = credentials(request)
+        if context["kind"] == "pat":
+            return context["actor"], context["obo"]
+        if context["kind"] == "user":
+            return context["actor"], context["actor"]
+        raise AuthorizationError("authz.sigt_scope_denied", "sigt 令牌不可用于需求起草动词端点")
+
+    def _pat_scope_required(request, scope):
+        context = credentials(request)
+        if context["kind"] == "pat" and scope not in (context.get("scope") or []):
+            raise AuthorizationError("authz.pat_scope_denied", f"PAT 未授予 {scope}")
+
+    @app.get("/settings")
+    def settings_page(request: Request):
+        session = page_session(request)
+        if session is None:
+            return RedirectResponse(url="/login", status_code=302)
+        return HTMLResponse(pages.render_settings(session["user"], authn.list_pats(session["user"])))
+
+    @app.post("/settings/pats")
+    async def settings_pats_create(request: Request):
+        session = page_session(request)
+        if session is None:
+            return RedirectResponse(url="/login", status_code=302)
+        form = await request.form()
+        record, token = _issue_pat(
+            resolve_repo(None),
+            session["user"],
+            str(form.get("label") or ""),
+            [str(value) for value in form.getlist("scope")],
+            str(form.get("expires_in") or "24h"),
+        )
+        return HTMLResponse(pages.render_pat_issued(session["user"], record, token))
+
+    @app.post("/api/pats")
+    def pats_issue_endpoint(request: Request, body: PatIssueBody):
+        context = credentials(request)
+        if context["kind"] != "user":
+            raise AuthorizationError("authz.session_required", "PAT 只能由本人登录签发，凭证不可代签")
+        record, token = _issue_pat(resolve_repo(None), context["actor"], body.label, body.scope, body.expires_in)
+        return ok({
+            "pat_id": record["pat_id"],
+            "label": record["label"],
+            "scope": record["scope"],
+            "expires_at": record["expires_at"],
+            "token": token,
+        })
+
+    @app.get("/api/pats")
+    def pats_list_endpoint(request: Request):
+        context = credentials(request)
+        if context["kind"] != "user":
+            raise AuthorizationError("authz.session_required", "仅本人可见本人 PAT")
+        return ok({"pats": authn.list_pats(context["actor"])})
+
+    @app.post("/api/pats/{pat_id}/revoke")
+    def pats_revoke_endpoint(request: Request, pat_id: str):
+        context = credentials(request)
+        if context["kind"] != "user":
+            raise AuthorizationError("authz.session_required", "仅本人可吊销本人 PAT")
+        record = authn.revoke_pat(pat_id, context["actor"])
+        record_pat_event(resolve_repo(None), "pat.revoked", context["actor"], {"pat_id": pat_id})
+        return ok({"pat_id": pat_id, "status": record["status"]})
+
+    @app.post("/api/requirements")
+    def requirement_create_endpoint(request: Request, body: RequirementCreateBody):
+        actor, on_behalf_of = _requirement_attribution(request)
+        _pat_scope_required(request, "requirement:create")
+        return ok(create_requirement(
+            resolve_repo(None), body.requirement_id, body.title, body.body, body.entries, actor, on_behalf_of))
+
+    @app.post("/api/requirements/{requirement_id}")
+    def requirement_update_endpoint(request: Request, requirement_id: str, body: RequirementUpdateBody):
+        actor, on_behalf_of = _requirement_attribution(request)
+        _pat_scope_required(request, "requirement:update")
+        return ok(update_requirement(
+            resolve_repo(None), requirement_id, body.body, body.entries, actor, on_behalf_of))
+
+    @app.post("/api/requirements/{requirement_id}/submission")
+    def requirement_submit_endpoint(request: Request, requirement_id: str, body: ConfirmBody | None = None):
+        actor, on_behalf_of = _requirement_attribution(request)
+        _pat_scope_required(request, "requirement:submit")
+        return ok(submit_requirement(resolve_repo(None), requirement_id, actor, on_behalf_of))
+
+    @app.post("/api/requirements/{requirement_id}/confirm")
+    async def requirement_confirm_endpoint(request: Request, requirement_id: str):
+        context = credentials(request)
+        if context["kind"] != "user":
+            raise AuthorizationError("authz.session_required", "confirm 只认本人交互登录，任何凭证不可代过")
+        content_type = request.headers.get("content-type", "")
+        if content_type.startswith("application/x-www-form-urlencoded") or content_type.startswith("multipart/form-data"):
+            form = await request.form()
+            entries = [str(value) for value in form.getlist("entries")]
+            confirm_requirement(resolve_repo(None), requirement_id, entries, context["actor"])
+            return RedirectResponse(url="/requirements/{}".format(requirement_id), status_code=303)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            raise PlatformError("request.invalid", "confirm body must be a JSON object")
+        entries = payload.get("entries") or []
+        if not isinstance(entries, list):
+            raise PlatformError("request.invalid", "confirm entries must be a list")
+        return ok(confirm_requirement(resolve_repo(None), requirement_id, entries, context["actor"]))
 
     @app.get("/")
     def overview(request: Request):
@@ -517,6 +734,8 @@ def create_app(default_repo=None):
         requirement = str(form.get("requirement") or "").strip()
         if not title or not requirement:
             raise PlatformError("request.invalid", "title and requirement are required and must be non-empty")
+        # T9 派生闸门（AC-05）：页面表单与 cookie API 同一条校验路径——需求须存在且 confirmed。
+        validate_requirement_derive(resolve_repo(None), requirement)
         # 与 POST /api/tasks 同一条创建路径：owner 锁定为登录用户，workspace 平台生成。
         workspace = str(Path(tempfile.gettempdir()) / new_id("signet-ws"))
         result = init_task(resolve_repo(None), workspace, title, requirement, session["user"], session["user"])
@@ -702,6 +921,11 @@ def create_app(default_repo=None):
         requirement = (body.requirement or "").strip()
         if not title or not requirement:
             raise PlatformError("request.invalid", "title and requirement are required and must be non-empty")
+        # T9 派生闸门（AC-05）：交互会话（cookie，页面同源动线）派生须需求存在且 confirmed；
+        # operator CLI（Bearer 用户令牌）保留自由引用，兼容 T1–T8 既有工作流与基线测试。
+        context = credentials(request)
+        if context["kind"] == "user" and context.get("via") == "cookie":
+            validate_requirement_derive(resolve_repo(None), requirement)
         # 身份锁定（T2 AC-09 语义）：owner 与事件归因均以凭据身份为准，请求体所填 owner 被会话覆盖。
         actor = request_actor(request)
         # 页面建任务：workspace 由服务端生成标识；显式传入（CLI/编排）时原样使用。

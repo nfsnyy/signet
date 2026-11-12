@@ -8,6 +8,7 @@ Done /（反查任务总数 - Void），分母为 0 时取 0。
 """
 
 import json
+import re
 from pathlib import Path
 
 from .domain import spec_path
@@ -17,6 +18,7 @@ from .taskfile import read_task
 
 PENDING_VERIFICATION_STATE = "Implemented"
 RECENT_EVENTS_LIMIT = 20
+RE_ENTRY_SPLIT = re.compile(r"[：:\s]")
 
 
 def list_tasks(repository):
@@ -205,7 +207,11 @@ def _requirement_entry(requirement_id, fields, tasks):
 
 
 def requirement_detail(repository, requirement_id):
-    """GET /api/requirements/{id} 的 result 负载；不存在时返回 None。"""
+    """GET /api/requirements/{id} 的 result 负载；不存在时返回 None。
+
+    负载含 metadata（title/status/priority/owner/progress）、正文原稿（body）、
+    判据条目（entries，「判据条目」节逐条编号）与反查任务（tasks）。
+    """
     repository = Path(repository)
     file_path = repository / "requirements" / requirement_id / "requirement.md"
     if not file_path.is_file():
@@ -227,8 +233,25 @@ def requirement_detail(repository, requirement_id):
         "owner": fields.get("owner"),
         "progress": requirement_progress(tasks, requirement_id),
         "body": body,
+        "entries": _requirement_entries(body),
         "tasks": requirement_task_ids(tasks, requirement_id),
     }
+
+
+def _requirement_entries(body):
+    """正文「判据条目」节的条目编号列表（- REQ-<n>：…；节外不计）。"""
+    entries = []
+    in_section = False
+    for line in str(body or "").splitlines():
+        if line.startswith("## "):
+            in_section = "判据条目" in line
+            continue
+        if in_section and line.startswith("- "):
+            token = line[2:].strip()
+            entry_id = RE_ENTRY_SPLIT.split(token, maxsplit=1)[0].strip()
+            if entry_id:
+                entries.append(entry_id)
+    return entries
 
 
 def task_board(repository):

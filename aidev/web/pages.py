@@ -31,6 +31,10 @@ _BADGE_CLASSES = {
     "Blocked": "blocked", "Void": "void",
 }
 
+_REQ_STATUS_CLASSES = {
+    "draft": "draft", "submitted": "progress", "confirmed": "done", "accepted": "done",
+}
+
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 # 分区规范：背景/目标主体展示；范围/不做/边界/参考/关联折叠（默认不收起）。
 _FOLD_KEYWORDS = ("范围", "不做", "边界", "参考", "关联")
@@ -130,7 +134,8 @@ def _page(title, user, active, body):
         f"<link rel=\"stylesheet\" href=\"{STYLE_URL}\"></head><body>"
         "<div class=\"topbar\"><span class=\"brand\">signet</span>"
         f"<nav>{nav}</nav>"
-        f"<span class=\"user\">{html.escape(user)}</span></div>"
+        f"<span class=\"user\">{html.escape(user)}"
+        f"　<a href=\"/settings\" title=\"用户设置\">⚙ 用户设置</a></span></div>"
         f"<div class=\"page\">{body}</div>"
         "</body></html>"
     )
@@ -140,6 +145,15 @@ def _state_badge(state):
     """状态徽标：未知状态退化为纯文本。"""
     text = str(state or "?")
     cls = _BADGE_CLASSES.get(text)
+    if cls is None:
+        return html.escape(text)
+    return f"<span class=\"badge {cls}\">{html.escape(text)}</span>"
+
+
+def _req_status_badge(status):
+    """需求状态徽标（T9 列表状态徽标）：未知状态退化为纯文本。"""
+    text = str(status or "-")
+    cls = _REQ_STATUS_CLASSES.get(text)
     if cls is None:
         return html.escape(text)
     return f"<span class=\"badge {cls}\">{html.escape(text)}</span>"
@@ -286,7 +300,7 @@ def render_requirements(user, entries):
             html.escape(entry["requirement_id"]),
             html.escape(entry.get("title") or ""),
             html.escape(entry["requirement_id"]),
-            html.escape(entry.get("status") or "-"),
+            _req_status_badge(entry.get("status")),
             html.escape(entry.get("priority") or "-"),
             html.escape(entry.get("owner") or "-"),
             entry.get("progress") or 0,
@@ -551,18 +565,64 @@ def render_task_form(user, requirement=None):
     return _page("signet 新建任务", user, "tasks", body)
 
 
+def _entry_derived_status(requirement_status, task_count, progress):
+    """条目状态推导：无独立状态机，由「需求确认状态 + 承载任务状态」推导。"""
+    if requirement_status != "confirmed":
+        return "草案"
+    if progress is not None and progress >= 1:
+        return "已覆盖"
+    if task_count:
+        return "已派生"
+    return "已确认"
+
+
 def render_requirement_detail(user, detail):
     requirement_id = str(detail.get("requirement_id") or "")
+    status = str(detail.get("status") or "-")
+    entries = [str(item) for item in (detail.get("entries") or [])]
     task_items = "".join(
         "<li><a href=\"/tasks/{}\"><code>{}</code></a></li>".format(
             html.escape(task_id), html.escape(task_id))
         for task_id in detail["tasks"]
     ) or "<li>无关联任务</li>"
+    derivation_rows = "".join(
+        "<tr><td><code>{}</code></td><td>{}</td></tr>".format(
+            html.escape(entry_id),
+            html.escape(_entry_derived_status(detail.get("status"), len(detail["tasks"]), detail.get("progress"))),
+        )
+        for entry_id in entries
+    )
+    derivation_block = (
+        "<h2>条目状态推导</h2>"
+        "<p class=\"muted\">条目不设独立状态机：草案 / 已确认 / 已派生 / 已覆盖"
+        " 由「需求确认状态 + 承载任务状态」推导展示。</p>"
+        "<table><tr><th>条目</th><th>推导状态</th></tr>{}</table>".format(derivation_rows or "<tr><td colspan=\"2\">（无判据条目）</td></tr>")
+    )
+    if status == "submitted" and entries:
+        checklist = "".join(
+            "<label><input type=\"checkbox\" name=\"entries\" value=\"{}\" checked> {}</label>".format(
+                html.escape(entry_id), html.escape(entry_id))
+            for entry_id in entries
+        )
+        confirm_block = (
+            "<h2>逐条确认（confirm）</h2>"
+            "<p class=\"muted\">本人登录逐项核对后一次提交全量清单；清单与当前条目集合"
+            "完全一致才会生效（缺条 / 多条 / 编号不存在一律拒绝）。</p>"
+            "<form method=\"post\" action=\"/api/requirements/{}/confirm\" class=\"card\">{}"
+            "<button class=\"btn\" type=\"submit\">确认全部条目</button></form>"
+        ).format(html.escape(requirement_id), checklist)
+    elif status == "confirmed":
+        confirm_block = "<h2>逐条确认（confirm）</h2><p class=\"muted\">本需求已确认，条目清单锁定；修订请直改文件走 git 留痕。</p>"
+    else:
+        confirm_block = (
+            "<h2>逐条确认（confirm）</h2>"
+            "<p class=\"muted\">需求当前状态 {}，提交（submit）后方可逐条确认。</p>".format(html.escape(status))
+        )
     body = (
         "<h1>{}（<code>{}</code>）</h1>".format(
             html.escape(detail.get("title") or ""), html.escape(requirement_id))
         + "<p class=\"muted\">状态：{}　优先级：{}　owner：{}　进度：{:.0%}　关联任务：{} 个</p>".format(
-            html.escape(detail.get("status") or "-"),
+            _req_status_badge(detail.get("status")),
             html.escape(detail.get("priority") or "-"),
             html.escape(detail.get("owner") or "-"),
             detail.get("progress") or 0,
@@ -572,6 +632,74 @@ def render_requirement_detail(user, detail):
             html.escape(requirement_id), html.escape(requirement_id))
         + "<h2>正文</h2>"
         + _render_document(detail["body"])
+        + derivation_block
+        + confirm_block
         + "<h2>关联任务</h2><ul class=\"related-tasks\">{}</ul>".format(task_items)
     )
     return _page("signet 需求详情", user, "requirements", body)
+
+
+def render_settings(user, pats=None):
+    """用户设置页（T9 settings 签发面）：PAT 生成表单 + 我的 PAT 列表。"""
+    scope_inputs = "".join(
+        "<label><input type=\"checkbox\" name=\"scope\" value=\"{}\"> {}</label>".format(scope, scope)
+        for scope in ("requirement:create", "requirement:update", "requirement:submit")
+    )
+    pat_rows = "".join(
+        "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+            html.escape(str(record.get("label") or "-")),
+            html.escape(", ".join(record.get("scope") or []) or "-"),
+            html.escape(str(record.get("created_at") or "-")),
+            html.escape(str(record.get("expires_at") or "-")),
+            html.escape(str(record.get("last_used") or "从未使用")),
+            html.escape(str(record.get("status") or "-")),
+        )
+        for record in (pats or [])
+    )
+    pat_table = (
+        "<table><tr><th>标签</th><th>scope</th><th>创建</th><th>过期</th><th>最近使用</th><th>状态</th></tr>{}</table>"
+    ).format(pat_rows or "<tr><td colspan=\"6\">（尚未签发任何 PAT）</td></tr>")
+    body = (
+        "<h1>用户设置</h1>"
+        "<p class=\"muted\">管理起草令牌（PAT）：签发后完整令牌仅显示一次，平台侧只存散列。"
+        "当前登录用户 {}</p>".format(html.escape(user))
+        + "<section class=\"card\"><h2>生成新 PAT</h2>"
+        "<form method=\"post\" action=\"/settings/pats\">"
+        "<label>执行者标签（必填，归属落账用）：<input name=\"label\" required></label>"
+        "<fieldset><legend>scope（仅需求起草三动词可勾）</legend>"
+        + scope_inputs
+        + "<label><input type=\"checkbox\" value=\"message:send\" disabled> message:send（预留项，不可勾选提交）</label>"
+        "</fieldset>"
+        "<label>有效期：<select name=\"expires_in\">"
+        "<option value=\"24h\">24 小时</option>"
+        "<option value=\"7d\">7 天</option>"
+        "<option value=\"30d\">30 天</option>"
+        "</select></label>"
+        "<button class=\"btn\" type=\"submit\">签发 PAT</button>"
+        "</form></section>"
+        "<section class=\"card\"><h2>我的 PAT</h2>" + pat_table + "</section>"
+        "<section class=\"card\"><h2>凭证模型不变量</h2>"
+        "<p class=\"muted\">PAT 是签发人授权给执行者标签的能力凭证（actor=签发人，on_behalf_of=执行者标签）；"
+        "confirm / 签署类闸门（条目确认、freeze 签署等）只认本人登录（交互会话），"
+        "PAT、sigt 等任何凭证都不可代过；需求起草动词（create / update / submit）"
+        "仅接受 Bearer PAT 调用。</p></section>"
+    )
+    return _page("signet 用户设置", user, "settings", body)
+
+
+def render_pat_issued(user, record, token):
+    """签发结果页：完整令牌仅此页显示一次。"""
+    body = (
+        "<h1>PAT 签发成功</h1>"
+        "<p class=\"muted\">完整令牌仅本次显示一次，请立即复制保存；平台侧只存散列，遗失只能重新签发。</p>"
+        "<section class=\"card\"><p>标签：{}　scope：{}　执行者：{}　过期：{}</p>"
+        "<pre>{}</pre>"
+        "<p><a href=\"/settings\">返回用户设置</a></p></section>"
+    ).format(
+        html.escape(str(record.get("label") or "-")),
+        html.escape(", ".join(record.get("scope") or [])),
+        html.escape(str(record.get("obo") or "-")),
+        html.escape(str(record.get("expires_at") or "-")),
+        html.escape(token),
+    )
+    return _page("signet PAT 已签发", user, "settings", body)
