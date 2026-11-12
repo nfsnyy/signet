@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>signet 概况</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<div class="topbar"><span class="brand">signet<span class="repo">signet-dev-state</span></span><nav><a href="index.html" class="active">概况</a><a href="tasks.html">任务</a><a href="requirements.html">需求</a></nav><a class="user" href="settings.html" title="用户设置">nfsnyy ⚙</a></div>
+<div class="page">
+  <h1>项目概况</h1>
+  <div class="stat-row">
+    <div class="stat-card"><div class="num">0</div><div class="label">Ready</div></div>
+    <div class="stat-card"><div class="num">0</div><div class="label">In Progress</div></div>
+    <div class="stat-card"><div class="num">0</div><div class="label">待验收</div></div>
+    <div class="stat-card"><div class="num">7</div><div class="label">Done（+3 Void 容器）</div></div>
+  </div>
+  <p class="muted">状态仓 <code>C:\myFolder\dsh\ai-registry\辅助开发平台\signet-dev-state</code> · commit <code>6e8dee6</code> · owner nfsnyy</p>
+
+  <h2>待验收队列（Implemented）</h2>
+  <table>
+    <tr><th>标题</th><th>任务</th><th>owner</th><th>更新时间</th><th></th></tr>
+    <tr><td colspan="5" class="muted">（空——验收通过后任务进入 Done）</td></tr>
+  </table>
+
+  <h2>改进点候车道（最新 3 条）</h2>
+  <table>
+    <tr><th style="width:70px;">编号</th><th>内容</th><th style="width:180px;">拟归并</th></tr>
+    <tr><td><code>#15</code></td><td>operator 动词页面化：verify/reject/close/freeze/ship 的页面入口（确认单设计见 <a href="task-detail-implemented.html">implemented 样例页</a>）</td><td>待立需求</td></tr>
+    <tr><td><code>EN-02</code></td><td>close --ship CLI 默认超时 60s 偏小，默认上调 + 超时文案提示</td><td>待立项</td></tr>
+    <tr><td><code>EN-03</code></td><td>reject 面板应常驻「input=Void 终态，返场须新建任务」警示</td><td><a href="requirement-detail-entries.html">page-human-readable</a></td></tr>
+  </table>
+  <p class="muted" style="margin-top:8px;"><a href="backlog.html">全部候车道 →</a>（债务 #16：改进点先入候车道，operator 定期分拣归并到需求条目）</p>
+
+  <h2>最近事件</h2>
+  <div class="design-note">
+    <strong>本区设计语言（T7 开发基准，验收以本节为准）</strong>
+    <ul>
+      <li>每行 = 一句人话：<strong>谁</strong> + <strong>做了什么</strong> + <strong>对哪个任务</strong> + 关键细节（chip）；不出现裸 event_type 与 36 位 UUID。</li>
+      <li>任务引用统一「<code>#短码</code> + 标题」：短码 = task_id 去掉 <code>task-</code> 前缀取前 8 位（如 <code>#5186ad73</code>），整行可点进任务详情。</li>
+      <li>时间相对化（N 分钟/小时/天前），悬停显示绝对时间；同一天内不分日期，跨天补日期。</li>
+      <li>状态迁移用 chip 呈现（如 <span class="chip state">Verified → Done</span>）；驳回/作废类事件用红色 chip 带理由。</li>
+      <li>actor ≠ on_behalf_of 时显示「代表 X」（如签发生命周期里的委托执行）。</li>
+      <li>概况页只放<strong>摘要</strong>；完整故事（报告/判据表/commit/理由）在任务详情页的<strong>事件时间线</strong>，每行带「详情 →」直达。</li>
+    </ul>
+  </div>
+  <ul class="feed">
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T07:25:26Z">12 分钟前</span>
+      <span class="feed-body"><span class="feed-actor">nfsnyy</span> 关闭并入库 <a href="task-detail-implemented.html"><span class="task-ref">#5186ad73</span></a> <span class="task-title">T6-closeout 返场：ship 动词 + refreeze 补卡 + 债务#11</span><span class="chip">commit 6580ddf</span><span class="chip state">Verified → Done</span><a class="feed-more" href="task-detail-implemented.html#timeline">详情 →</a></span>
+    </li>
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T07:22:25Z">15 分钟前</span>
+      <span class="feed-body"><span class="feed-actor">nfsnyy</span> 确认机器验收结果，<a href="task-detail-implemented.html"><span class="task-ref">#5186ad73</span></a> <span class="task-title">T6-closeout 返场</span> 验收通过<span class="chip state">Implemented → Verified</span><a class="feed-more" href="task-detail-implemented.html#timeline">详情 →</a></span>
+    </li>
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T07:22:25Z">15 分钟前</span>
+      <span class="feed-body"><span class="feed-actor">verifier-t1</span> 执行机器验收，16 项判据全部通过<span class="chip">指纹 cecd1e45</span><a class="feed-more" href="task-detail-implemented.html#timeline">详情 →</a></span>
+    </li>
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T07:14:37Z">23 分钟前</span>
+      <span class="feed-body"><span class="feed-actor">agent-t6</span> 提交验收 <a href="task-detail-implemented.html"><span class="task-ref">#5186ad73</span></a> <span class="task-title">T6-closeout 返场</span><span class="chip">报告 + 7 件证据</span><span class="chip state">In Progress → Implemented</span><a class="feed-more" href="task-detail-implemented.html#timeline">详情 →</a></span>
+    </li>
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T06:46:21Z">1 小时前</span>
+      <span class="feed-body"><span class="feed-actor">agent-t6</span> 领取 <a href="task-detail-ready.html"><span class="task-ref">#5186ad73</span></a> <span class="task-title">T6-closeout 返场</span>，租约至 11-11<span class="chip state">Ready → In Progress</span><a class="feed-more" href="task-detail-implemented.html#timeline">详情 →</a></span>
+    </li>
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T06:34:26Z">2 小时前</span>
+      <span class="feed-body"><span class="feed-actor">nfsnyy</span> 冻结规格 v1（H1/H2 双签），<a href="task-detail-ready.html"><span class="task-ref">#5186ad73</span></a> <span class="task-title">T6-closeout 返场</span> 进入 Ready<span class="chip state">Draft → Ready</span><a class="feed-more" href="task-detail-implemented.html#timeline">详情 →</a></span>
+    </li>
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T06:25:07Z">2 小时前</span>
+      <span class="feed-body"><span class="feed-actor">nfsnyy</span> 作废旧实体 <span class="task-ref">#9276c877</span> <span class="task-title">T6 迭代3收尾</span><span class="chip warn">input：共享 HOME 致提案归因污染</span><span class="chip state">→ Void（终态，留档审计）</span><a class="feed-more" href="task-detail-implemented.html#timeline">详情 →</a></span>
+    </li>
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T05:58:12Z">3 小时前</span>
+      <span class="feed-body"><span class="feed-actor">nfsnyy</span> 重冻规格 v3 → v4<span class="chip">夹具断言修复（git show 内容断言）</span><a class="feed-more" href="task-detail-implemented.html#timeline">详情 →</a></span>
+    </li>
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T05:44:03Z">3 小时前</span>
+      <span class="feed-body"><span class="feed-actor">agent-t6</span> 登记改进点<span class="chip">refreeze 前 fixture 最小冒烟</span><a class="feed-more" href="task-detail-implemented.html#timeline">详情 →</a></span>
+    </li>
+  </ul>
+</div>
+</body>
+</html>

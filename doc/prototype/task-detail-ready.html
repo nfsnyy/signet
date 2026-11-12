@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>signet 任务详情</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<div class="topbar"><span class="brand">signet<span class="repo">signet-dev-state</span></span><nav><a href="index.html">概况</a><a href="tasks.html" class="active">任务</a><a href="requirements.html">需求</a></nav><a class="user" href="settings.html" title="用户设置">nfsnyy ⚙</a></div>
+<div class="crumbs"><a href="index.html">概况</a> / <a href="tasks.html">任务看板</a> / <span class="task-ref">#00000000</span>（样例）</div>
+<div class="page">
+  <h1>T7 页面事件流人读渲染 <span class="badge ready">Ready</span> <span class="muted" style="font-size:13px;font-weight:400;">（原型样例：签署冻结后此页即真实任务详情）</span></h1>
+  <p class="muted">requirement：<a href="requirement-detail-entries.html">page-human-readable</a>（条目 REQ-1/2/3）· owner：nfsnyy · 冻结：验收卡 v1 / 契约 v1 / 映射 v1（+4 资产）</p>
+
+  <div class="dispatch-card">
+    <details open>
+      <summary>派活卡——复制以下内容开新 session 即领任务</summary>
+      <pre>你是 signet 平台的开发 agent，actor=agent-t7，on_behalf_of=agent-t7（私有 HOME 登录后领取）。
+第一步：调用 aidev-agent skill，按会话启动协议用工作区
+C:\myFolder\dsh\ai-registry\辅助开发平台\workspaces\t7-event-caption
+claim（显式 --on-behalf-of agent-t7）并获取任务包，claim 后等 operator sync。
+全部依据冻结三件套（v1）；设计语言以 doc/prototype/index.html 与
+task-detail-done.html 的事件流/时间线注解块为验收基准；不要 push；
+完成后 submit，不宣布完成。项目经验读状态仓 hints.md。</pre>
+    </details>
+  </div>
+
+  <div class="op-area">
+    <h3>接取 / 分配</h3>
+    <div class="op-row">
+      <button class="btn small" type="button">接取：签发给当前用户（nfsnyy）</button>
+      <button class="btn small ghost" type="button">分配：签发给…（选用户）</button>
+      <a class="btn small ghost" href="task-sign.html">冻结 / 改规格（签署页）</a>
+      <button class="btn small danger" type="button">作废（void）</button>
+    </div>
+    <p class="op-note">按钮与 CLI 调同一端点（v0.8.5 动词双入口）。接取 = 任何登录用户对自己签发；分配 = owner 对其他用户签发（事件 actor 记为签发人）。多 session 协作沟通走任务级信箱（需求 task-collab-mailbox，立项后接入本页）。</p>
+  </div>
+
+  <div class="op-area" style="border-left:4px solid var(--accent);">
+    <h3>签发结果（点「接取/分配」后展开）</h3>
+    <div class="design-note" style="margin:0;">
+      <strong>执行 ID 语义（你给到 session 的那个 ID）</strong>
+      <ul>
+        <li>=<strong>能力令牌（sigt）</strong>：绑定 <strong>哪个任务（task_id）</strong> + <strong>给谁（actor）</strong>，外加版本 / 状态仓 / 过期时间，HMAC 签名防伪造。</li>
+        <li><strong>仅指定人可用</strong>：别人拿到令牌验签即拒（actor 不匹配）；平台据此把完成归属记在执行者（on_behalf_of）名下，签发人负问责。</li>
+        <li>用法：复制下方「派活卡」开新 session，agent 凭 <code>claim --handoff &lt;sigt&gt;</code> 接管，任务包自动落地其工作区。</li>
+        <li>令牌有过期时间；过期或遗失可重签（事件链保留，旧令牌自动失效）。</li>
+      </ul>
+    </div>
+    <div class="dispatch-card" style="margin-top:10px;">
+      <details open>
+        <summary>派活卡（自动填入接取人）</summary>
+        <pre>你是 signet 平台的开发 agent，actor=agent-t7，on_behalf_of=agent-t7。
+sigt：sigt.v2.task-00000000-…….actor-nfsnyy.exp-20261111…（HMAC 签名，仅 nfsnyy 可用）
+第一步：调用 aidev-agent skill，按会话启动协议用工作区
+C:\myFolder\dsh\ai-registry\辅助开发平台\workspaces\t7-event-caption
+claim --handoff &lt;上面的 sigt&gt;，任务包落地后等 operator sync。</pre>
+      </details>
+    </div>
+    <div class="op-row" style="margin-top:8px;">
+      <button class="btn small ghost" type="button">复制派活卡</button>
+      <button class="btn small ghost" type="button">重签（旧令牌即刻失效）</button>
+    </div>
+  </div>
+
+  <h2>任务说明（task.md 原稿）</h2>
+  <pre># T7 页面事件流人读渲染
+
+需求 page-human-readable 的首个切片：概况页最近事件 + 任务详情事件时间线，
+23 类事件人读渲染（eventcaption 渲染层），payload 关键字段入句；
+任务引用 #短码+标题，时间相对化；账本/API 零变更。
+验收以原型设计语言（index.html / task-detail 事件流注解块）为基准。</pre>
+
+  <h2>验收卡（冻结版本 v1）</h2>
+  <table>
+    <tr><th style="width:70px;">AC</th><th style="width:80px;">强度</th><th>文本</th></tr>
+    <tr><td><code>AC-01</code></td><td>must</td><td>23 类事件全覆盖中文人读渲染，payload 关键字段入句，无裸 event_type/UUID（case-caption-coverage）</td></tr>
+    <tr><td><code>AC-02</code></td><td>must</td><td>#短码+标题+详情链接，时间相对化（case-render-fields）</td></tr>
+    <tr><td><code>AC-03</code></td><td>must</td><td>recent_events 字段集、snapshot 既有键零缺失（case-api-stable）</td></tr>
+    <tr><td><code>AC-04</code></td><td>must【人工】</td><td>人面走查：抽 10 条真实事件无需对照即可理解。</td></tr>
+  </table>
+
+  <h2 id="timeline">事件时间线</h2>
+  <ul class="feed">
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T08:55:00Z">11-10 08:55</span>
+      <span class="feed-body"><span class="feed-actor">nfsnyy</span> 冻结规格 v1（H1/H2 双签），任务进入 Ready<span class="chip state">Draft → Ready</span></span>
+    </li>
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T08:40:00Z">11-10 08:40</span>
+      <span class="feed-body"><span class="feed-actor">nfsnyy</span> 创建任务（从需求条目 REQ-1 派生）<span class="chip state">→ Draft</span></span>
+    </li>
+  </ul>
+</div>
+</body>
+</html>

@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>signet 任务看板</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<div class="topbar"><span class="brand">signet<span class="repo">signet-dev-state</span></span><nav><a href="index.html">概况</a><a href="tasks.html" class="active">任务</a><a href="requirements.html">需求</a></nav><a class="user" href="settings.html" title="用户设置">nfsnyy ⚙</a></div>
+<div class="crumbs"><a href="index.html">概况</a> / 任务看板</div>
+<div class="page">
+  <h1>任务看板</h1>
+  <a class="btn primary-action" href="task-new.html">+ 新建任务</a>
+
+  <div class="op-area" style="padding:10px 14px;">
+    <div class="op-row">
+      <label style="font-size:13px;color:var(--muted);">筛选：</label>
+      <select style="padding:6px 10px;border:1px solid var(--line);border-radius:6px;">
+        <option>owner：全部</option><option>owner：nfsnyy</option>
+      </select>
+      <select style="padding:6px 10px;border:1px solid var(--line);border-radius:6px;">
+        <option>领取人：全部</option><option>领取人：agent-t6</option><option>领取人：未领取</option>
+      </select>
+      <select style="padding:6px 10px;border:1px solid var(--line);border-radius:6px;">
+        <option>需求：全部</option><option>page-human-readable</option><option>iteration-3-platform</option>
+      </select>
+      <input style="padding:6px 10px;border:1px solid var(--line);border-radius:6px;flex:1;min-width:160px;" placeholder="搜索标题 / #短码">
+    </div>
+    <p class="op-note">筛选口径：owner（建任务的人）、领取人（当前/曾经持有租约的 actor）、需求（requirement 引用）。「我的」快捷筛选 = owner 或领取人 = 当前登录用户。</p>
+  </div>
+
+  <div class="board">
+    <div class="board-col">
+      <h3>Ready（0 + 1 草案）</h3>
+      <div class="task-card" style="opacity:.75;">
+        <div class="title"><a href="task-detail-ready.html"><span class="task-ref">#00000000</span> T7 页面事件流人读渲染（草案）</a></div>
+        <div class="meta">requirement：page-human-readable · 条目 REQ-1–4（草案） · owner：nfsnyy · <span class="muted">未入账——三件套签署后此卡转正，「接取」按钮即生效</span></div>
+        <div class="op-row" style="margin-top:8px;"><button class="btn small" type="button" disabled title="草案未冻结，签署后可接取">接取（签发给当前用户）</button></div>
+      </div>
+    </div>
+    <div class="board-col">
+      <h3>In Progress（0）</h3>
+    </div>
+    <div class="board-col">
+      <h3>Implemented · 待验收（0）</h3>
+    </div>
+    <div class="board-col">
+      <h3>Blocked（0）</h3>
+      <p class="muted" style="font-size:12px;">（状态样例见 <a href="task-detail-blocked.html">blocked 样例页</a>）</p>
+    </div>
+  </div>
+
+  <h2 style="margin-top:24px;">Done（7）</h2>
+  <div class="board" style="grid-template-columns:repeat(2,1fr);">
+    <div class="task-card"><div class="title"><a href="task-detail-done.html"><span class="task-ref">#5186ad73</span> T6-closeout 返场：ship 动词 + refreeze 补卡 + 债务#11</a></div><div class="meta">requirement：iteration-3-platform · 关闭入库 11-10（commit 6580ddf）</div></div>
+    <div class="task-card"><div class="title"><a href="task-detail-done.html"><span class="task-ref">#e48fce43</span> handoff 令牌全流程与 skill 更新（T5）</a></div><div class="meta">requirement：iteration-3-platform · 关闭入库 11-10（commit d052c9b）</div></div>
+    <div class="task-card"><div class="title"><span class="task-ref">#322855c2</span> 任务看板、详情与页面建任务（T4）</div><div class="meta">requirement：iteration-3-platform · 关闭 11-10</div></div>
+    <div class="task-card"><div class="title"><span class="task-ref">#b42e9622</span> 登录、授权与能力令牌（T2）</div><div class="meta">requirement：iteration-3-platform · 已关闭</div></div>
+    <div class="task-card"><div class="title"><span class="task-ref">#c9fe9dbc</span> project 与需求只读面（API + 页面）（T3）</div><div class="meta">requirement：iteration-3-platform · 已关闭</div></div>
+    <div class="task-card"><div class="title"><span class="task-ref">#fb2abea8</span> 服务骨架、测试基建与全动词 API 化（T1）</div><div class="meta">requirement：iteration-3-platform · 已关闭</div></div>
+    <div class="task-card"><div class="title"><span class="task-ref">#f6d1db62</span> 平台 README 与启动脚本（T0 正式）</div><div class="meta">requirement：iteration-3-platform · 已关闭</div></div>
+  </div>
+
+  <details style="margin-top:16px;"><summary class="muted">Void（3）· 终态留档，点击查看</summary>
+    <div class="task-card"><div class="title"><span class="task-ref">#9276c877</span> T6 迭代3收尾（旧实体）</div><div class="meta">input 作废：共享 HOME 归因污染 · 由 #5186ad73 返场接续</div></div>
+    <div class="task-card"><div class="title"><span class="task-ref">#d1d4d060</span> T0 试点容器</div><div class="meta">input 作废：试点完成，正式任务 #f6d1db62 接续</div></div>
+    <div class="task-card"><div class="title"><span class="task-ref">#342ddf86</span> 平台改进 backlog（enhancement 登记容器）</div><div class="meta">input 作废：容器职能由 backlog 页承担</div></div>
+  </details>
+
+  <p class="muted" style="margin-top:12px;">状态样例页（设计语言参考）：<a href="task-detail-ready.html">Ready/派活</a> · <a href="task-detail-draft.html">Draft/待签署</a> · <a href="task-detail-implemented.html">Implemented/待验收</a> · <a href="task-detail-blocked.html">Blocked/阻塞</a> · <a href="task-detail-done.html">Done/已收官</a></p>
+</div>
+</body>
+</html>

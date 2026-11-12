@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>signet 任务详情</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<div class="topbar"><span class="brand">signet<span class="repo">signet-dev-state</span></span><nav><a href="index.html">概况</a><a href="tasks.html" class="active">任务</a><a href="requirements.html">需求</a></nav><a class="user" href="settings.html" title="用户设置">nfsnyy ⚙</a></div>
+<div class="crumbs"><a href="index.html">概况</a> / <a href="tasks.html">任务看板</a> / <span class="task-ref">#5186ad73</span></div>
+<div class="page">
+  <h1>T6-closeout 返场：ship 动词 + refreeze 补卡 + 债务#11 <span class="badge done">Done · 已入库</span></h1>
+  <p class="muted">requirement：<a href="requirement-detail.html">iteration-3-platform</a> · owner：nfsnyy · 实现：agent-t6（代表本人）<br>
+  冻结：验收卡 v1 / 契约 v1 / 映射 v1（内容同旧实体 v4，逐字节一致）· 创建 11-10 · 收官 11-10</p>
+
+  <div class="op-area">
+    <h3>任务已收官</h3>
+    <p class="op-note">11-10 由 nfsnyy 关闭并双仓入库：平台仓 commit <code>6580ddf</code> / 状态仓 <code>ac333e9</code>；指纹 <code>cecd1e45</code> 与验收记录一致。操作全史见下方时间线；后续变更须开新任务（状态机规则：Void/Done 均终态）。</p>
+  </div>
+
+  <h2>任务说明</h2>
+  <div class="design-note">
+    <strong>分区渲染规范（任务说明编写规范 v2 · T8 候选；本条已立为 page-human-readable REQ-5）</strong>
+    <ul>
+      <li><strong>背景 / 目标</strong>面向人：自然语言，外行能懂，禁术语堆叠——是"发生了什么、要做到什么"。</li>
+      <li><strong>范围 / 不做</strong>面向 agent：条目化、精确、以冻结三件套为准——是"做什么、别做什么"。</li>
+      <li><strong>参考</strong>折叠。背景与目标纳入人面走查（AC-04 类）。</li>
+    </ul>
+  </div>
+  <div class="task-brief">
+    <h3>背景</h3>
+    <p>迭代 3 的收尾任务。平台已经跑通「建任务 → agent 领取开发 → 验收」全链，但还缺最后一环：验收通过后，代码怎么正式入库。同时前几轮验收暴露了四个工程问题（请求超时、编排临时文件散落、换行符兼容、动词命名不一致），账目上还有一个归属问题：完成记录必须挂在实际执行的 agent 名下，而不是签发令牌的人。</p>
+    <h3>目标</h3>
+    <p>验收通过后，operator 点一次「关闭并入库」：平台自动把平台仓代码提交并推送（提交信息带任务号）、与验收时记录的指纹比对防止动手脚、落「已入库」账目（含 commit 号和执行者归属）。</p>
+    <details><summary>范围（面向 agent，细节以冻结三件套为准）</summary>
+      <pre>ship 动词全流程（catalog 六要素 / 授权 / task.shipped 幂等 / 指纹比对 / CLI 本机入库）、
+refreeze 补卡、债务 #11 四案（超时 env 化 / 临时工作区 / CRLF 容忍 / 动词守护）、
+AC-16 执行者归因（actor=签发人问责锁定、on_behalf_of=执行者）。</pre>
+    </details>
+    <details><summary>参考</summary>
+      <p class="muted">验收卡 v1（16 条）· 设计稿 v0.9 §15 债务表 · hints.md「close --ship 超时不等于失败」条</p>
+    </details>
+  </div>
+
+  <h2>验收卡（冻结版本 v1，16 条）</h2>
+  <table>
+    <tr><th style="width:70px;">AC</th><th style="width:80px;">强度</th><th>文本</th></tr>
+    <tr><td><code>AC-01</code></td><td>must</td><td>ship 入 catalog（六要素）+ openapi；匿名 401 / sigt 403 / 非 Done 拒绝……</td></tr>
+    <tr><td><code>AC-05</code></td><td>must</td><td>CLI ship 本机 add/commit/push，提交信息含 task_id，干净幂等 noop……</td></tr>
+    <tr><td><code>AC-16</code></td><td>must</td><td>执行者归因：actor=令牌签发人、on_behalf_of=执行者，self_review 以执行者判定……</td></tr>
+    <tr><td colspan="3" class="muted">……（共 16 条，3 机测用例 + 1 人工；完整见冻结件）</td></tr>
+  </table>
+
+  <h2 id="timeline">事件时间线</h2>
+  <div class="design-note">
+    <strong>时间线设计语言（与概况页事件流同一套句式，T7 开发基准）</strong>
+    <ul>
+      <li>每条事件默认只显一行人读摘要；点摘要展开<strong>结构化负载</strong>——报告摘要、判据结果表、commit/指纹、完整理由。裸 JSON 不出现在页面。</li>
+      <li>「详情 →」跳回任务详情本区（概况页事件流与这里是同一份数据的两种粒度）。</li>
+    </ul>
+  </div>
+  <ul class="feed">
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T07:25:26Z">11-10 07:25</span>
+      <span class="feed-body"><span class="feed-actor">nfsnyy</span> 关闭并入库，平台仓 commit <code>6580ddf</code><span class="chip">状态仓 ac333e9</span><span class="chip state">Verified → Done</span></span>
+    </li>
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T07:22:25Z">11-10 07:22</span>
+      <span class="feed-body"><span class="feed-actor">nfsnyy</span> 确认机器验收结果，任务验收通过<span class="chip state">Implemented → Verified</span></span>
+    </li>
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T07:22:25Z">11-10 07:22</span>
+      <span class="feed-body"><details>
+        <summary><span class="feed-actor">verifier-t1</span> 执行机器验收，16 项判据全部通过<span class="chip">指纹 cecd1e45</span></summary>
+        <div class="feed-detail">
+          <table>
+            <tr><th style="width:70px;">判据</th><th style="width:60px;">结果</th><th>用例 / 说明</th></tr>
+            <tr><td><code>AC-01</code></td><td>通过</td><td>case-catalog-ship：ship 入 catalog 六要素</td></tr>
+            <tr><td><code>AC-05</code></td><td>通过</td><td>case-cli-ship-local：本机 commit/push + 幂等 noop</td></tr>
+            <tr><td><code>AC-11</code></td><td>通过</td><td>case-verb-guard：catalog 动词连字符归一 + 守护</td></tr>
+            <tr><td><code>AC-16</code></td><td>通过</td><td>case-executor-attribution：执行者归因全链（含 self_review 放行）</td></tr>
+          </table>
+          <p class="muted" style="margin-top:6px;">展示 4 行样例；实现按判据数全量渲染。</p>
+        </div>
+      </details></span>
+    </li>
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T07:14:37Z">11-10 07:14</span>
+      <span class="feed-body"><details>
+        <summary><span class="feed-actor">agent-t6</span> 提交验收<span class="chip">报告 + 证据 7 件</span><span class="chip state">In Progress → Implemented</span></summary>
+        <div class="feed-detail">
+          <p><strong>报告摘要（五段式）：</strong>实现 ship 全流程 + refreeze 补卡 + 债务#11 四案 + AC-16 归因；15 案机验全绿 + 回归 38/38；偏差 1 项（夹具笔误按语义实现并登记 refreeze，已解决）；协作请求：operator sync。</p>
+          <p class="muted">证据：evidence/ 7 件（final-sweep、用例日志、回归日志、变更清单、git status）。</p>
+        </div>
+      </details></span>
+    </li>
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T06:46:21Z">11-10 06:46</span>
+      <span class="feed-body"><span class="feed-actor">agent-t6</span> 领取任务，租约至 11-11<span class="chip state">Ready → In Progress</span></span>
+    </li>
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T06:34:26Z">11-10 06:34</span>
+      <span class="feed-body"><span class="feed-actor">nfsnyy</span> 冻结规格 v1（H1/H2 双签），任务进入 Ready<span class="chip state">Draft → Ready</span></span>
+    </li>
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T06:25:07Z">11-10 06:25</span>
+      <span class="feed-body"><span class="feed-actor">nfsnyy</span> 创建返场任务（旧实体 <span class="task-ref">#9276c877</span> 已 Void，三件套原样重冻）<span class="chip state">→ Draft</span></span>
+    </li>
+  </ul>
+</div>
+</body>
+</html>

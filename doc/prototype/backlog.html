@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>signet 改进点候车道</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<div class="topbar"><span class="brand">signet<span class="repo">signet-dev-state</span></span><nav><a href="index.html">概况</a><a href="tasks.html">任务</a><a href="requirements.html">需求</a></nav><a class="user" href="settings.html" title="用户设置">nfsnyy ⚙</a></div>
+<div class="crumbs"><a href="index.html">概况</a> / 改进点候车道（backlog）</div>
+<div class="page">
+  <h1>改进点候车道 <span class="muted" style="font-size:13px;font-weight:400;">（债务 #16：改进点不是任务也不是需求，先入此道，operator 定期分拣归并）</span></h1>
+
+  <div class="design-note">
+    <strong>本页规则</strong>
+    <ul>
+      <li>来源二：agent 的 <code>enhancement</code> 提案（落 <code>enhancement.recorded</code> 事件，自动进本表）＋ 人手工登记。</li>
+      <li>分拣三去向：归并到某需求的判据条目 · 立为新需求 · 标注「不采纳」留档。</li>
+      <li>设计稿 §15 债务表（#1–#20）是平台自身债务的权威台账；本表是其页面形态 + 运行时改进点的统一视图。</li>
+    </ul>
+  </div>
+
+  <h2>开放中</h2>
+  <table>
+    <tr><th style="width:70px;">编号</th><th>内容</th><th style="width:140px;">来源</th><th style="width:130px;">拟归并</th><th style="width:110px;"></th></tr>
+    <tr><td><code>#15</code></td><td>operator 动词页面化：verify/reject/close 按钮 ✓（implemented 页）＞ freeze/refreeze 上传 UI+签署页（task-sign ✓ 样例）＞ ship 混合流确认单（样例）＞ sync 按钮</td><td>设计稿债务表</td><td>待立需求「operator 动词页面化」</td><td><button class="btn small" type="button">归并 / 立项</button></td></tr>
+    <tr><td><code>#17</code></td><td>人面可懂性闸门：页面内容人读验收成为任务收口的一部分</td><td>设计稿债务表</td><td><a href="requirement-detail-entries.html">page-human-readable</a></td><td><span class="badge progress">已归并</span></td></tr>
+    <tr><td><code>#19</code></td><td>验收能力令牌：verify 身份从人登录解耦</td><td>设计稿债务表</td><td>待立项（随 mailbox）</td><td><button class="btn small" type="button">归并 / 立项</button></td></tr>
+    <tr><td><code>#20</code></td><td>主动通知：inbox 未读 / 待签署 / 待验收的页面徽章与推送</td><td>设计稿债务表</td><td><a href="requirement-detail-entries.html">page-human-readable</a>（角标部分）</td><td><span class="badge progress">已归并</span></td></tr>
+    <tr><td><code>EN-01</code></td><td>refreeze 前 fixture 最小冒烟（防冻结后才发现夹具不可跑）</td><td>enhancement 事件（agent-t6）</td><td>三件套编写规范</td><td><span class="badge progress">已归并</span></td></tr>
+    <tr><td><code>EN-02</code></td><td>close --ship CLI 默认超时 60s 小于服务端 push 耗时：默认上调 + 超时文案提示「先查账本再重试」</td><td>T6 收官复盘（nfsnyy）</td><td>待立项</td><td><button class="btn small" type="button">归并 / 立项</button></td></tr>
+    <tr><td><code>EN-03</code></td><td>reject 面板在页面上弱化了 input=Void 的终态警示（返场须新建任务的提示应常驻）</td><td>T6 收官复盘（nfsnyy）</td><td><a href="requirement-detail-entries.html">page-human-readable</a></td><td><span class="badge progress">已归并</span></td></tr>
+    <tr><td><code>EN-04</code></td><td>条目级派生关联落地：init-task 支持 <code>--req-item</code>，task.md 记条目引用；需求页按条目算进度与反查承载任务</td><td>走查反馈（nfsnyy）</td><td>需求管理闭环 <code>requirement-management</code>（REQ-3）</td><td><span class="badge progress">已归并</span></td></tr>
+    <tr><td><code>EN-05</code></td><td>Draft 起草流闭环：签署页自动取领取工作区三件套（废上传）；新增 spec 提案类型（起草产物提交通道）；skill 增补「起草模式」SOP（澄清对话 → 按规范成稿 → 自验 → 提交）</td><td>走查反馈（nfsnyy）</td><td>随「operator 动词页面化」立项</td><td><button class="btn small" type="button">归并 / 立项</button></td></tr>
+    <tr><td><code>EN-06</code></td><td>任务包附带 skill：claim 落地含 SKILL.md 全文（或任务包 API 带 skill 字段），agent 凭 sigt 零外部依赖；派活卡模板化（sigt+工作区+一句"先读工作区 SKILL.md"），不再承担 SOP 传输——多机部署形态（#6）的前置</td><td>走查反馈（nfsnyy：session 怎么知道指引）</td><td>随 skill 演进立项</td><td><button class="btn small" type="button">归并 / 立项</button></td></tr>
+  </table>
+
+  <h2>已消除（节选）</h2>
+  <table>
+    <tr><th style="width:70px;">编号</th><th>内容</th><th style="width:180px;">消除方式</th></tr>
+    <tr><td><code>#11</code></td><td>请求超时 / 编排临时文件 / CRLF / 动词连字符 四案</td><td>T6 落地（超时 env 化 SIGNET_REQUEST_TIMEOUT）</td></tr>
+    <tr><td><code>#18</code></td><td>设计内容三层归位（平台级 skill / 项目级 design / 草稿工作区）</td><td>约定确立并入设计稿 v0.9</td></tr>
+  </table>
+
+  <p class="muted" style="margin-top:12px;">登记入口：任意 agent session 用 <code>aidev-agent.py enhance --title "..." --details "..."</code>；或在需求页/任务页点「登记改进点」。本页数据 = 事件流 + 手工登记，与账本同源。</p>
+</div>
+</body>
+</html>

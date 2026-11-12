@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>signet 新建任务</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<div class="topbar"><span class="brand">signet<span class="repo">signet-dev-state</span></span><nav><a href="index.html">概况</a><a href="tasks.html" class="active">任务</a><a href="requirements.html">需求</a></nav><a class="user" href="settings.html" title="用户设置">nfsnyy ⚙</a></div>
+<div class="crumbs"><a href="index.html">概况</a> / <a href="tasks.html">任务看板</a> / 新建任务（从需求条目派生）</div>
+<div class="page">
+  <h1>新建任务 <span class="muted" style="font-size:13px;font-weight:400;">（从需求条目派生——主路径；本页是 operator 快捷方式，来源需求必填、不可凭空建任务）</span></h1>
+
+  <div class="design-note">
+    <strong>本页在派生流中的位置</strong>
+    <ul>
+      <li>入口：需求详情页某条目点「派生任务」→ 本页<strong>自动锁定</strong>来源需求与条目号（只读，防脱节）。</li>
+      <li>创建 = init-task：task.md 写入 <code>requirement</code> + <code>req_item</code> 引用 → <strong>Draft</strong>。</li>
+      <li>下一步：Draft 页上传三件套 → 签署页 H1/H2 → freeze → Ready（条目流水线前进一格）。</li>
+    </ul>
+  </div>
+
+  <form class="card">
+    <label>标题（*）</label><input name="title" required placeholder="一句话说清做什么" value="T7 页面事件流人读渲染">
+    <label>来源需求（*，从条目派生时已锁定）</label>
+    <select name="requirement" required disabled>
+      <option value="page-human-readable" selected>page-human-readable（页面人面可读性）— 锁定</option>
+    </select>
+    <label>判据条目（*，派生锚点）</label>
+    <input name="req_item" value="REQ-1（合并承载 REQ-1–4）" readonly>
+    <button class="btn" type="button" onclick="location.href='task-detail-draft.html'">创建任务（→ Draft）</button>
+    <p class="hint">owner 自动取当前登录用户（身份锁定）。创建后 task.md 即带需求与条目引用；一个条目可派生多个 task（返场另开），条目进度以「承载任务中走得最远者」显示，Done 后条目关闭。</p>
+  </form>
+</div>
+</body>
+</html>

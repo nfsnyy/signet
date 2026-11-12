@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>signet 需求详情</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<div class="topbar"><span class="brand">signet<span class="repo">signet-dev-state</span></span><nav><a href="index.html">概况</a><a href="tasks.html">任务</a><a href="requirements.html" class="active">需求</a></nav><a class="user" href="settings.html" title="用户设置">nfsnyy ⚙</a></div>
+<div class="crumbs"><a href="index.html">概况</a> / <a href="requirements.html">需求列表</a> / <code>task-collab-mailbox</code></div>
+<div class="page">
+  <h1>任务级协作信箱：session 间异步沟通与人在环决策 <span class="badge draft">draft</span></h1>
+  <p class="muted"><code>task-collab-mailbox</code> · 优先级 P1 · owner：nfsnyy · 条目覆盖 0/5 · 已登记状态仓（8a2b3bb）。<br>背景：T6 返场一轮中 operator 与执行 agent 的沟通（状态报告 / 决策请求 / 返场指令）全靠人肉在多 session 间搬运文本，沟通过程不入账、审计断截。</p>
+
+  <h2>目标</h2>
+  <p>围绕同一任务的多个 session（执行/验收/operator）与人，通过平台异步沟通；人只在页面做决策，不再当传话筒。</p>
+
+  <h2>完成判据（条目 = 派生锚点）</h2>
+  <table>
+    <tr><th style="width:130px;">条目</th><th>判据</th><th style="width:100px;">验证</th><th style="width:160px;">状态</th><th style="width:110px;"></th></tr>
+    <tr><td><code>REQ-1</code></td><td>agent 经 CLI 向 operator / 另一 actor 发任务级消息（note/question/block），复用提案+sync 写路径，落 events 审计。</td><td>机测</td><td><span class="badge ready">未派生</span></td><td><a class="btn small" href="task-new.html">派生任务</a></td></tr>
+    <tr><td><code>REQ-2</code></td><td>收件人 sync 后消息投影至工作区 inbox（未读计数），session 启动流程可读。</td><td>机测</td><td><span class="badge ready">未派生</span></td><td><a class="btn small" href="task-new.html">派生任务</a></td></tr>
+    <tr><td><code>REQ-3</code></td><td>question 类消息在页面形成「待决策」队列；人在页面答复生成 decision 记录与事件，agent 下次 sync 可见。</td><td>机测 +【人工】</td><td><span class="badge ready">未派生</span> <span class="muted">依赖人在环页面能力</span></td><td><a class="btn small" href="task-new.html">派生任务</a></td></tr>
+    <tr><td><code>REQ-4</code></td><td>页面任务详情可按时间线查看该任务全部协作消息与决策（人面审计视图）。</td><td>【人工】</td><td><span class="badge ready">未派生</span></td><td><a class="btn small" href="task-new.html">派生任务</a></td></tr>
+    <tr><td><code>REQ-5</code></td><td>T6 式返场流程经信箱流转后，除人在页面点决策外全程无需人工搬运文本。</td><td>【人工】</td><td><span class="badge ready">未派生</span></td><td><a class="btn small" href="task-new.html">派生任务</a></td></tr>
+  </table>
+
+  <h2>关联任务</h2>
+  <p class="muted">（尚未派生——立项排序：排在「operator 动词页面化」之后或并行，REQ-3 与其共享人在环页面能力）</p>
+
+  <p class="muted" style="margin-top:16px;">关联：债务 #20（主动通知）是落地依赖之一；工作区 outbox-collab 目录为设计预留通道。新模型示例（条目锚点交互）见 <a href="requirement-detail-entries.html">page-human-readable →</a>。</p>
+</div>
+</body>
+</html>

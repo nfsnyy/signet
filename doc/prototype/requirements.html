@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>signet 需求列表</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<div class="topbar"><span class="brand">signet<span class="repo">signet-dev-state</span></span><nav><a href="index.html">概况</a><a href="tasks.html">任务</a><a href="requirements.html" class="active">需求</a></nav><a class="user" href="settings.html" title="用户设置">nfsnyy ⚙</a></div>
+<div class="crumbs"><a href="index.html">概况</a> / 需求列表</div>
+<div class="page">
+  <h1>需求列表</h1>
+  <a class="btn primary-action" href="requirement-new.html">+ 新建需求</a>
+  <table>
+    <tr><th>标题</th><th>id</th><th>状态</th><th>优先级</th><th>owner</th><th>来源</th><th>条目进度</th><th>任务</th></tr>
+    <tr>
+      <td><a href="requirement-detail-entries.html">页面人面可读性：事件流人读渲染与任务引用规范化</a> <span class="badge verified">confirmed</span></td>
+      <td><code>page-human-readable</code></td>
+      <td>confirmed</td><td>P1</td><td>nfsnyy</td><td>使用反馈（事件流走查）</td><td>0/5（T7 草案承载 REQ-1–4，REQ-5 为 T8 候选）</td><td>0（T7 未入账）</td>
+    </tr>
+    <tr>
+      <td><a href="requirement-detail-entries.html">需求管理闭环：录入、判据条目生命周期与进度口径</a> <span class="badge verified">confirmed</span></td>
+      <td><code>requirement-management</code></td>
+      <td>confirmed</td><td>P1</td><td>nfsnyy</td><td>走查反馈（本页三连问）</td><td>0/5</td><td>0</td>
+    </tr>
+    <tr>
+      <td><a href="requirement-detail-mailbox.html">任务级协作信箱：session 间异步沟通与人在环决策</a></td>
+      <td><code>task-collab-mailbox</code></td>
+      <td>confirmed</td><td>P1</td><td>nfsnyy</td><td>讨论沉淀（T6 人肉传话）</td><td>0/5</td><td>0</td>
+    </tr>
+    <tr>
+      <td><a href="requirement-detail.html">迭代 3：平台产品化（API-first 平台 + 能力令牌 + 页面）</a> <span class="badge ready">里程碑存档</span></td>
+      <td><code>iteration-3-platform</code></td>
+      <td>accepted</td><td>P0</td><td>nfsnyy</td><td>迭代规划（旧模型）</td><td>100%（T0–T6 全部收口）</td><td>7 Done + 3 Void 容器</td>
+    </tr>
+  </table>
+  <p class="muted" style="margin-top:12px;">需求录 = 状态仓 requirements/&lt;id&gt;/requirement.md（页面化前为直写本仓）；新需求按 v0.8.6 模型：目标 + 判据条目（≤5 条），完成度 = 条目覆盖率。<a href="backlog.html">改进点候车道 →</a></p>
+</div>
+</body>
+</html>

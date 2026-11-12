@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>signet 任务详情</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<div class="topbar"><span class="brand">signet<span class="repo">signet-dev-state</span></span><nav><a href="index.html">概况</a><a href="tasks.html" class="active">任务</a><a href="requirements.html">需求</a></nav><a class="user" href="settings.html" title="用户设置">nfsnyy ⚙</a></div>
+<div class="crumbs"><a href="index.html">概况</a> / <a href="tasks.html">任务看板</a> / <span class="task-ref">#e48fce43</span></div>
+<div class="page">
+  <h1>handoff 令牌全流程与 skill 更新（T5） <span class="badge blocked">Blocked</span> <span class="muted" style="font-size:13px;font-weight:400;">（历史样例：该阻塞已通过 refreeze v3 解决并收官，本页展示阻塞态设计语言）</span></h1>
+  <p class="muted">requirement：<a href="requirement-detail.html">iteration-3-platform</a> · owner：nfsnyy · 实现：agent-t5 · 冻结 v2<br>阻塞由提案 <code>proposal-92ebd172</code>（block 类）引出 · 11-10 12:37</p>
+
+  <div class="op-area" style="border-left:4px solid #b45309;">
+    <h3>阻塞卡</h3>
+    <p><strong>原因：</strong>冻结夹具缺陷：t5_common.py（钉扎 c944ad7a…）的 init_task(token, slug, requirement) 无默认值，verify_hints_injected.py 以 2 实参调用必挂 TypeError——<strong>与平台实现无关，任何实现必挂</strong>；已用补丁副本旁证 AC-10 平台行为正常。</p>
+    <p style="margin-top:8px;"><strong>证据：</strong><code>evidence/case-hints-injected-failure.log</code>（TypeError 全栈）、<code>hints-proposal.md</code>（旁证记录）</p>
+  </div>
+
+  <div class="op-area">
+    <h3>operator 处置（三选一）</h3>
+    <div class="op-row">
+      <a class="btn small" href="task-sign.html">① 修夹具并 refreeze（签署页 v2→v3）</a>
+      <button class="btn small ghost" type="button">② 驳回（reject → 任务回 Ready，实现返场）</button>
+      <button class="btn small ghost" type="button">③ sync 后让 agent 补充材料再定</button>
+    </div>
+    <p class="op-note">block 不是终态：Lease 仍归 agent-t5。历史处置=①：operator 修 fixture 一行 + refreeze v3，agent 复跑 11/11 绿后 submit 收官。</p>
+  </div>
+
+  <h2>事件时间线</h2>
+  <ul class="feed">
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T12:37:00Z">11-10 12:37</span>
+      <span class="feed-body"><span class="feed-actor">agent-t5</span> 标记阻塞，等待 operator 处置<span class="chip warn">fixture 缺陷，非实现问题</span><span class="chip state">In Progress → Blocked</span></span>
+    </li>
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T01:12:33Z">11-10 01:12</span>
+      <span class="feed-body"><span class="feed-actor">agent-t5</span> 领取任务，租约至 11-11<span class="chip state">Ready → In Progress</span></span>
+    </li>
+  </ul>
+</div>
+</body>
+</html>

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>signet 需求详情</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<div class="topbar"><span class="brand">signet<span class="repo">signet-dev-state</span></span><nav><a href="index.html">概况</a><a href="tasks.html">任务</a><a href="requirements.html" class="active">需求</a></nav><a class="user" href="settings.html" title="用户设置">nfsnyy ⚙</a></div>
+<div class="crumbs"><a href="index.html">概况</a> / <a href="requirements.html">需求列表</a> / <code>page-human-readable</code></div>
+<div class="page">
+  <h1>页面人面可读性：事件流人读渲染与任务引用规范化 <span class="badge verified">confirmed</span></h1>
+  <p class="muted"><code>page-human-readable</code> · 优先级 P1 · owner：nfsnyy · 条目覆盖 0/5 · 已登记状态仓（37ab015）。<br>背景：页面是给人审计用的（平台两面性原则的人面），但事件流等视图直接暴露机器字段，走查反馈"看不出发生了什么"。</p>
+
+  <div class="op-area">
+    <h3>需求状态：confirmed · 已确认（2026-11-10 对话确认留痕 be65933）</h3>
+    <div class="op-row">
+      <span class="badge verified">条目已确认（REQ-1–5）</span>
+      <a class="btn small" href="task-new.html">立即派生</a>
+    </div>
+    <p class="op-note">confirm = 质量闸门（判据立不立得住，一次落事件）；派生 = 调度决策（按条目分批）。confirm 完成态即派生入口。</p>
+  </div>
+
+  <h2>目标</h2>
+  <p>页面的人视图层全部改说人话：事件流可读、任务可辨认（短码+标题）、时间可感知（相对时间），且不动账本与 API 的事件结构。</p>
+
+  <div class="design-note">
+    <strong>需求 → 任务派生流（v0.8.6 模型，本页即此流的视图）</strong>
+    <ul>
+      <li><strong>判据条目 = 派生锚点</strong>：一条条目派生一个 task（返场/另切再派）；条目与 task 是 1:N。</li>
+      <li>派生动作 = init-task（预填 requirement + 条目号）→ <strong>Draft</strong>（起草 agent 生成三件套）→ <strong>签署 freeze</strong> → <strong>Ready</strong> → 领取执行 → <strong>Done ⇒ 条目覆盖</strong>。</li>
+      <li>需求进度 = 条目 Done 数 / 总条目数（非任务数口径）。</li>
+      <li>数据落点：task.md 记 <code>requirement</code> + <code>req_item</code>；需求页据此反查"哪个条目由哪条任务承载"。<strong>条目级关联平台待实现（backlog EN-04）</strong>，本页为设计基准。</li>
+      <li><strong>三道闸门</strong>（requirement-management REQ-6）：G1 需求逐条确认（未确认不可派生）→ G2 三件套每条 AC 可追溯到已确认条目 + 机检绿（含 fixture 冒烟）→ G3 H1/H2 双签 freeze。闸门防两类事故：任务跑偏、合同缺陷。</li>
+      <li><strong>confirm ≠ 派生</strong>：confirm 是质量闸门（"立不立得住"，整篇一次）；派生是调度决策（"现在做不做、从哪条做起"，按条目可分批）。确认不派生的正常场景：排队等排期 / 分批推进（先 REQ-1 后 REQ-5）/ 等前置需求 / 纯目标登记（confirm 后归档）。confirm 完成态直接给「立即派生」入口，动线相邻。</li>
+    </ul>
+  </div>
+
+  <div class="design-note">
+    <strong>条目的三个职责（人不是只点「派生」）</strong>
+    <ul>
+      <li><strong>验收基准的锚</strong>：task 三件套里每条 AC 都应挂到某个条目——条目是"为什么有这条验收"的出处，需求进度按条目覆盖率算。</li>
+      <li><strong>判据质量闸门</strong>：条目由人<strong>逐条确认/修订</strong>（草案由起草 agent 生成，确认 ≠ 起草者）；条目质量决定派生 task 的质量。</li>
+      <li><strong>收口确认</strong>：需求完成 = 条目全 Done + 人确认动作（落事件）。</li>
+    </ul>
+    条目无独立状态机：状态由「需求确认 + 承载任务」<strong>推导</strong>——<span class="pipe"><span class="cur">草案（需求 draft）</span> → <strong>已确认（需求 confirmed）</strong> → 已派生（有承载 task）→ 已覆盖（承载 task Done）</span>；条目确认并入需求 confirm（逐条打勾是 UX，落一个事件）。
+  </div>
+
+  <h2>完成判据（条目 = 派生锚点）</h2>
+  <table>
+    <tr><th style="width:90px;">条目</th><th>判据</th><th style="width:96px;">验证</th><th style="width:280px;">派生状态（条目级流水线）</th><th style="width:110px;"></th></tr>
+    <tr>
+      <td><code>REQ-1</code></td>
+      <td>概况页"最近事件"对账本全部 23 类事件做人读渲染：中文句式映射 + payload 关键字段入句；无裸 event_type / 裸 UUID。</td>
+      <td>机测 +【人工】</td>
+      <td><span class="badge done" style="font-size:11px;">条目已确认</span><br><span class="pipe"><span class="cur">● 草案</span> → ○ 签署 → ○ Ready → ○ 执行 → ○ Done</span><br><span class="muted">承载：<a href="task-detail-draft.html">T7 草案</a>（REQ-1–4 合并承载）</span></td>
+      <td><a class="btn small" href="task-detail-draft.html">看 T7 草案</a></td>
+    </tr>
+    <tr>
+      <td><code>REQ-2</code></td>
+      <td>任务在人视图层一律「#短码 + 标题」呈现并可点击进入详情；UUID 全串只许悬停/技术区。</td>
+      <td>机测</td>
+      <td><span class="badge done" style="font-size:11px;">条目已确认</span><br><span class="pipe"><span class="cur">● 草案</span> → ○ 签署 → ○ Ready → ○ 执行 → ○ Done</span><br><span class="muted">承载：<a href="task-detail-draft.html">T7 草案</a></span></td>
+      <td><a class="btn small" href="task-detail-draft.html">看 T7 草案</a></td>
+    </tr>
+    <tr>
+      <td><code>REQ-3</code></td>
+      <td>时间相对化显示（x 分钟前），悬停 title 给绝对时间。</td>
+      <td>机测</td>
+      <td><span class="badge done" style="font-size:11px;">条目已确认</span><br><span class="pipe"><span class="cur">● 草案</span> → ○ 签署 → ○ Ready → ○ 执行 → ○ Done</span><br><span class="muted">承载：<a href="task-detail-draft.html">T7 草案</a></span></td>
+      <td><a class="btn small" href="task-detail-draft.html">看 T7 草案</a></td>
+    </tr>
+    <tr>
+      <td><code>REQ-4</code></td>
+      <td>改动仅限页面渲染层与 snapshot 组装；账本 events.jsonl 结构与 /api 事件字段零变更。</td>
+      <td>机测</td>
+      <td><span class="badge done" style="font-size:11px;">条目已确认</span><br><span class="pipe"><span class="cur">● 草案</span> → ○ 签署 → ○ Ready → ○ 执行 → ○ Done</span><br><span class="muted">承载：<a href="task-detail-draft.html">T7 草案</a></span></td>
+      <td><a class="btn small" href="task-detail-draft.html">看 T7 草案</a></td>
+    </tr>
+    <tr>
+      <td><code>REQ-5</code></td>
+      <td>任务说明分区渲染与编写规范：背景/目标面向人（自然语言、外行可懂），范围/不做面向 agent（条目精确），参考折叠；页面分区渲染，背景目标纳入人面走查。合同性文本（验收卡判据）不受人读化约束。</td>
+      <td>【人工】</td>
+      <td><span class="pipe"><span class="todo">○ 未派生（T8 候选）</span></span><br><span class="muted">分区渲染样例见 <a href="task-detail-done.html">done 页</a></span></td>
+      <td><button class="btn small" type="button">确认条目</button> <button class="btn small ghost" type="button">修订</button><br><a class="btn small ghost" href="task-new.html" style="margin-top:6px;">派生任务</a></td>
+    </tr>
+  </table>
+  <div class="op-row" style="margin-top:8px;"><button class="btn small ghost" type="button">+ 新增条目（需求持续演化）</button> <span class="muted">条目确认落事件（confirm ≠ 起草者）；修订走 git 留痕</span></div>
+  <p class="muted" style="margin-top:10px;">需求完成判据：全部条目 Done 且本需求无 open enhancement。「派生任务」= init-task 预填需求与条目 → Draft → 三件套 freeze → Ready → 接取签发；条目 Done 由承载任务 close 自动回填（人工条目的确认在任务验收时完成，不重复点）。</p>
+
+  <h2>关联任务（含来源条目反查）</h2>
+  <table>
+    <tr><th>任务</th><th>标题</th><th style="width:150px;">来源条目</th><th>状态</th></tr>
+    <tr><td><span class="task-ref">#00000000</span>（未入账）</td><td><a href="task-detail-draft.html">T7 页面事件流人读渲染</a>（三件套草案在 staging，待 H1/H2 签署）</td><td><code>REQ-1</code>–<code>REQ-4</code> 合并承载</td><td><span class="badge draft">Draft 草案</span></td></tr>
+  </table>
+
+  <p class="muted" style="margin-top:16px;">工件引用：设计语言以 <code>doc/prototype/</code> 为基准（index.html 事件流注解块 + task-detail 时间线注解块）；设计稿 §15 债务 #17 归并至本需求。旧模型示例见 <a href="requirement-detail.html">iteration-3-platform（里程碑存档）</a>。</p>
+</div>
+</body>
+</html>

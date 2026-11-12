@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>signet 需求详情</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<div class="topbar"><span class="brand">signet<span class="repo">signet-dev-state</span></span><nav><a href="index.html">概况</a><a href="tasks.html">任务</a><a href="requirements.html" class="active">需求</a></nav><a class="user" href="settings.html" title="用户设置">nfsnyy ⚙</a></div>
+<div class="crumbs"><a href="index.html">概况</a> / <a href="requirements.html">需求列表</a> / <code>iteration-3-platform</code></div>
+<div class="page">
+  <h1>迭代 3：平台产品化（API-first 平台 + 能力令牌 + 页面） <span class="badge ready">里程碑存档 · 100%</span></h1>
+  <p class="muted">状态：accepted · 优先级：P0 · owner：nfsnyy · T0–T6 全部收口（7 Done，含 1 次 Void 返场）· 旧模型（v0.8.6 前）：无判据条目，按任务清单跟踪；新模型示例见 <a href="requirement-detail-entries.html">page-human-readable →</a></p>
+
+  <h2>正文（原稿）</h2>
+  <pre># 迭代 3：平台产品化
+
+把已验证的 MVP 工具链做成完整平台：平台服务（FastAPI）+ 全动词 API 为唯一逻辑所在；
+CLI（双入口）薄壳化为 API 客户端；handoff ID 升级为 HMAC 签名能力令牌……
+
+设计文档：doc/迭代3-平台产品化设计.md（v0.9）。验收以各任务冻结的三件套为准。</pre>
+
+  <h2>关联任务（T0–T6 全链）</h2>
+  <table>
+    <tr><th>任务</th><th>标题</th><th>状态</th><th>收官</th></tr>
+    <tr><td><span class="task-ref">#5186ad73</span></td><td><a href="task-detail-done.html">T6-closeout 返场：ship 动词 + refreeze 补卡 + 债务#11</a></td><td><span class="badge done">Done</span></td><td>11-10（commit 6580ddf）</td></tr>
+    <tr><td><span class="task-ref">#e48fce43</span></td><td><a href="task-detail-done.html">T5 handoff 令牌全流程与 skill 更新</a></td><td><span class="badge done">Done</span></td><td>11-10（commit d052c9b）</td></tr>
+    <tr><td><span class="task-ref">#322855c2</span></td><td>T4 任务看板、详情与页面建任务</td><td><span class="badge done">Done</span></td><td>11-10</td></tr>
+    <tr><td><span class="task-ref">#c9fe9dbc</span></td><td>T3 project 与需求只读面（API + 页面）</td><td><span class="badge done">Done</span></td><td>—</td></tr>
+    <tr><td><span class="task-ref">#b42e9622</span></td><td>T2 登录、授权与能力令牌</td><td><span class="badge done">Done</span></td><td>—</td></tr>
+    <tr><td><span class="task-ref">#fb2abea8</span></td><td>T1 服务骨架、测试基建与全动词 API 化</td><td><span class="badge done">Done</span></td><td>—</td></tr>
+    <tr><td><span class="task-ref">#f6d1db62</span></td><td>T0 平台 README 与启动脚本（正式）</td><td><span class="badge done">Done</span></td><td>—</td></tr>
+    <tr><td colspan="4" class="muted">Void 容器（终态留档，非本需求任务）：#9276c877 T6 旧实体 · #d1d4d060 T0 试点 · #342ddf86 backlog 容器 → 见看板折叠区</td></tr>
+  </table>
+
+  <p class="muted" style="margin-top:16px;">本需求收口后平台进入迭代 4：候选见 <a href="backlog.html">改进点候车道</a>（#15 operator 动词页面化 · <a href="requirement-detail-mailbox.html">task-collab-mailbox</a> · <a href="requirement-detail-entries.html">page-human-readable</a>）。</p>
+</div>
+</body>
+</html>

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>signet 签署规格</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<div class="topbar"><span class="brand">signet<span class="repo">signet-dev-state</span></span><nav><a href="index.html">概况</a><a href="tasks.html" class="active">任务</a><a href="requirements.html">需求</a></nav><a class="user" href="settings.html" title="用户设置">nfsnyy ⚙</a></div>
+<div class="crumbs"><a href="index.html">概况</a> / <a href="tasks.html">任务看板</a> / <a href="task-detail-ready.html"><code>task-e48fce43</code></a> / 签署规格 v3</div>
+<div class="page">
+  <h1>签署：handoff 令牌全流程与 skill 更新（T5）· 规格 v2 → v3 <span class="badge implemented">待你签署</span></h1>
+  <p class="muted"><code>task-e48fce43-1d83-4c22-8d06-01a2ef637e76</code> · requirement：<a href="requirement-detail.html">iteration-3-platform</a> · 发起人：nfsnyy（operator）· refreeze 理由：修复冻结夹具 t5_common.py init_task 缺省参数（agent block 提案 proposal-92ebd172 引出）<br><strong>三件套来源：领取工作区草案（agent 生成并提交）——本页不做上传，只做人读确认与签署。</strong>Draft 首次 freeze 与 refreeze 共用本页。</p>
+
+  <h2>① 变更摘要（先看这里）</h2>
+  <table>
+    <tr><th>文件</th><th>变化</th></tr>
+    <tr><td><code>contract/t5_common.py</code></td><td>1 行：<code>-def init_task(token, slug, requirement):</code> → <code>+def init_task(token, slug, requirement="t5-fixture"):</code></td></tr>
+    <tr><td><code>contract.json</code> assets 清单</td><td>t5_common.py 哈希 <code>c944ad7a…</code> → <code>c8b4291e…</code>（改资产必须同步改清单，规范 §4）</td></tr>
+    <tr><td>验收卡 / 映射</td><td><strong>无变化</strong>——12 条 AC 原样、11 个用例原样</td></tr>
+    <tr><td>safety-veto 面</td><td>未触及——平台判定 <code>refreeze.veto_required</code> = 不需要</td></tr>
+  </table>
+
+  <h2>② H1 内容确认——「写得对，且我读得懂」</h2>
+  <div class="handoff-card">
+    <p>验收卡全文（12 条，冻结版本 v3 与 v2 相同）——逐条走查，重点问自己：<strong>什么叫完成，我能不能一句话复述给第三方？</strong></p>
+    <table>
+      <tr><th style="width:70px;">AC</th><th style="width:80px;">强度</th><th>判据</th></tr>
+      <tr><td><code>AC-01</code></td><td>must</td><td>领取签发：页面领取 → sigt 令牌含 v/task/actor/repo 且 HMAC 验签通过……</td></tr>
+      <tr><td><code>AC-02</code></td><td>must</td><td>claim 幂等：同 actor 重 claim = 接管 + 续期（lease.renewed）……</td></tr>
+      <tr><td><code>AC-10</code></td><td>must</td><td>hints.md 注入：任务包含 hints.md，init-task 与 claim 两落点一致……</td></tr>
+      <tr><td colspan="3" class="muted">……（共 12 条，此处折叠展示 3 条样例；人工项 AC-09 在 ③ 的验收环节走查）</td></tr>
+    </table>
+    <p class="op-note">签署含义：H1 = 我确认完成定义<strong>写得对</strong>，且<strong>我能读懂</strong>（可读性确认，债务 #17 闸门）。</p>
+    <button class="btn small" type="button">签 H1（content_confirmed）</button>
+  </div>
+
+  <h2>③ H2 一致性确认——「三件套装配互洽」</h2>
+  <div class="op-area">
+    <p>平台预检报告（机检已跑，绿清单供你抽查）：</p>
+    <table>
+      <tr><th>预检项</th><th>结果</th></tr>
+      <tr><td>schema 校验（card/contract/mapping）</td><td><span class="badge done">通过</span></td></tr>
+      <tr><td>覆盖对账：card 12 条 = mapping 12 行</td><td><span class="badge done">通过</span></td></tr>
+      <tr><td>case 并集 = mapping case_ids（11 案）</td><td><span class="badge done">通过</span></td></tr>
+      <tr><td>资产哈希核对（13 个文件）</td><td><span class="badge done">全一致</span></td></tr>
+      <tr><td>AC ↔ 条目追溯对账</td><td><span class="badge done">通过</span><span class="muted">（16 条 AC 全部挂回 REQ-1–4，0 脱节）</span></td></tr>
+      <tr><td>fixture 最小冒烟（EN-01）</td><td><span class="badge done">通过</span></td></tr>
+      <tr><td>safety-veto 降级判定</td><td><span class="badge done">未触及</span></td></tr>
+    </table>
+    <p class="op-note">签署含义：H2 = 我确认<strong>装配互洽</strong>（机检绿清单我抽查无异议）。</p>
+    <button class="btn small" type="button">签 H2（consistency_confirmed）</button>
+  </div>
+
+  <div class="op-row" style="margin-top:16px;">
+    <button class="btn" type="button">一键双签并 refreeze（v3）</button>
+    <button class="btn ghost" type="button">拒绝（写回 reason，任务保持 Blocked/Ready）</button>
+  </div>
+  <p class="muted" style="margin-top:10px;">签署 = 调用 refreeze 端点（actor 锁定为当前登录用户），落 <code>content_confirmed</code> / <code>consistency_confirmed</code> 事件并入账推送；签署后任务回 Ready，agent 重新 claim 继续。<strong>待签队列</strong>（设计中）：概况页与任务详情对"轮到你签"的徽章置顶，平台主动推给你，不再靠 agent 人肉提醒。</p>
+
+  <p class="muted" style="margin-top:16px;">本页为原型演示（数据=T5 v3 真实 refreeze）。进入方式：任务详情"冻结/改规格"操作区 → 待签署任务从看板/队列进入。</p>
+</div>
+</body>
+</html>

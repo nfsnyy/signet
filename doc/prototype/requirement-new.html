@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>signet 新建需求</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<div class="topbar"><span class="brand">signet<span class="repo">signet-dev-state</span></span><nav><a href="index.html">概况</a><a href="tasks.html">任务</a><a href="requirements.html" class="active">需求</a></nav><a class="user" href="settings.html" title="用户设置">nfsnyy ⚙</a></div>
+<div class="crumbs"><a href="index.html">概况</a> / <a href="requirements.html">需求列表</a> / 新建需求</div>
+<div class="page">
+  <h1>新建需求</h1>
+
+  <div class="op-area" style="border-left:4px solid var(--accent);">
+    <h3>主路径：起草流（人配合 agent 产生需求）</h3>
+    <p>一句话动机 → 你在<strong>用户 settings 生成起草令牌 PAT</strong>（绑你 + scope=需求起草 + 执行者标签 + 过期）交给 session 里的起草 agent——<strong>agent 无自有账号，令牌本质是你对这个 session 的授权</strong> → agent 与你对话澄清 → 生成 requirement.md + 判据条目草案 → submit 请你确认 → 你<strong>本人登录逐条打勾 confirm</strong> → 生效可派生。</p>
+    <div class="op-row">
+      <input style="padding:6px 10px;border:1px solid var(--line);border-radius:6px;flex:1;min-width:280px;" placeholder="一句话想法，如：任务页面上看不出需求是怎么变成任务的">
+      <a class="btn small" href="settings.html">去 settings 生成 PAT + 派活卡</a>
+    </div>
+    <p class="op-note">动作集仅 5 个动词（create / update / submit / confirm / archive），复用提案+sync 与事件链；归因双字段随凭证：actor=你（问责）、on_behalf_of=执行者标签（归属）。</p>
+  </div>
+
+  <div class="design-note" style="margin-top:16px;">
+    <strong>需求从哪来（三个口，都是先成需求再派任务）</strong>
+    <ul>
+      <li><strong>使用反馈</strong>：页面走查 / 使用中发现的问题（如 page-human-readable 来自"事件流看不懂"）。</li>
+      <li><strong>backlog 归并</strong>：改进点候车道分拣时「立为新需求」（如本需求来自走查缺口）。</li>
+      <li><strong>讨论沉淀</strong>：开发过程中的痛与想法（如 task-collab-mailbox 来自 T6 人肉传话）。</li>
+    </ul>
+    需求不是凭空写的文档：先有一句话的真实动机，再起草成「目标 + 判据条目」结构。
+  </div>
+
+  <h2>辅路径：表单直录（你已经有成稿内容）</h2>
+  <form class="card">
+    <label>标题（*）</label><input required placeholder="一句话说清要达成什么">
+    <label>背景（*，一句话动机：从哪个口来、解决什么痛）</label><input required placeholder="如：走查反馈——任务看板看不出任务的来龙去脉">
+    <label>目标（*，自然语言，外行可懂）</label><input required placeholder="如：让任何人打开看板就能看懂每条任务在干什么">
+    <label>判据条目（*，≤5 条，编号 REQ-x；可随后再补）</label>
+    <textarea rows="4" style="width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;" placeholder="每条一行：可检验的完成口径"></textarea>
+    <button class="btn" type="button" onclick="location.href='requirement-detail-entries.html'">登记（→ draft，待确认条目）</button>
+  </form>
+
+  <h2>模式 B：起草流（只有一句话想法，让 agent 起草）</h2>
+  <div class="op-area" style="border-left:4px solid var(--accent);">
+    <p>填一句话动机 → 平台生成「需求起草任务」（Draft）→ 你接取开 session → 起草 agent 生成 requirement.md + 判据条目草案 → <strong>你逐条确认 / 修订</strong> → 入账 accepted。</p>
+    <div class="op-row">
+      <input style="padding:6px 10px;border:1px solid var(--line);border-radius:6px;flex:1;min-width:280px;" placeholder="一句话想法，如：任务页面上看不出需求是怎么变成任务的">
+      <button class="btn small" type="button">生成起草任务</button>
+    </div>
+    <p class="op-note">起草流复用 Draft 任务机制（接取/起草/提交/确认），与三件套起草同一套"起草 ≠ 确认"闸门。</p>
+  </div>
+</div>
+</body>
+</html>

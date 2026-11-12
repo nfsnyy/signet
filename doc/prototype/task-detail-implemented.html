@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>signet 任务详情</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<div class="topbar"><span class="brand">signet<span class="repo">signet-dev-state</span></span><nav><a href="index.html">概况</a><a href="tasks.html" class="active">任务</a><a href="requirements.html">需求</a></nav><a class="user" href="settings.html" title="用户设置">nfsnyy ⚙</a></div>
+<div class="crumbs"><a href="index.html">概况</a> / <a href="tasks.html">任务看板</a> / <span class="task-ref">#5186ad73</span></div>
+<div class="page">
+  <h1>T6-closeout 返场：ship 动词 + refreeze 补卡 + 债务#11 <span class="badge implemented">Implemented · 待验收</span></h1>
+  <p class="muted">requirement：<a href="requirement-detail.html">iteration-3-platform</a> · owner：nfsnyy · 实现：agent-t6（代表本人）<br>
+  冻结：验收卡 v1 / 契约 v1 / 映射 v1 · 创建 11-10 · 提交 11-10 07:14</p>
+
+  <div class="handoff-card">
+    <details open>
+      <summary>交接卡（验收操作手册）速览：机器验收 <code>verify --execute</code>（15 案 + 1 人工项）；驳回 <code>reject</code>；关闭入库 <code>close --ship</code></summary>
+      <pre># 机器验收（16 判据；人工项 AC-11 先核查再录结果）
+python aidev-operator.py verify --repo &lt;状态仓&gt; --task-id &lt;id&gt; \
+  --execute --verifier verifier-t1 --confirmed-by nfsnyy \
+  --manual-results &lt;manual.json&gt; --push
+# 不通过则驳回返场（input=Void 终态，返场须新建任务！）
+python aidev-operator.py reject --repo &lt;状态仓&gt; --task-id &lt;id&gt; \
+  --actor nfsnyy --category implementation --reason "..." --push
+# 通过后关闭并入库（平台仓本机 commit+push 由 CLI 执行）
+python aidev-operator.py close --repo &lt;状态仓&gt; --task-id &lt;id&gt; \
+  --decision accept --ship --actor nfsnyy --reason "..." --push</pre>
+    </details>
+  </div>
+
+  <div class="op-area">
+    <h3>验收操作</h3>
+    <div class="op-row">
+      <button class="btn small" type="button">① 机器验收（verify）</button>
+      <button class="btn small danger" type="button">驳回返场（reject）</button>
+      <button class="btn small ghost" type="button" disabled title="需先完成 verify（含人工项 AC-11）">② 关闭并入库（close --ship）</button>
+    </div>
+    <p class="op-note">前置：① 字面环境三变量核对（BASE_URL / STATE_REPO / PLATFORM_REPO）；② 人工项 AC-11 核查后录 <code>--manual-results</code>；③ 身份硬校验——confirm 者 ≠ 实现者（当前登录 nfsnyy ≠ agent-t6）。</p>
+  </div>
+
+  <div class="op-area" style="border-left:4px solid var(--accent);">
+    <h3>② 关闭并入库 · 确认单（点「关闭」后展开）</h3>
+    <div class="op-row"><input style="padding:6px 10px;border:1px solid var(--line);border-radius:6px;flex:1;min-width:280px;" placeholder="关闭理由（必填，入账 task.closed）" value="迭代3收官：15案机验全绿+AC-11人工确认"></div>
+    <table style="margin-top:10px;">
+      <tr><th>将要发生的动作（按序）</th><th style="width:90px;">执行方</th></tr>
+      <tr><td>平台仓本机 <code>git add/commit/push</code>，提交信息含 task_id（<code>ship: task-5186ad73…</code>）</td><td>CLI（本机）</td></tr>
+      <tr><td>指纹比对：工作区指纹 vs 本次 verify 记录 <code>cecd1e45</code>，不一致则 409 拒绝</td><td>服务端</td></tr>
+      <tr><td>落账 <code>task.closed</code> + <code>task.shipped</code>（含 commit 与指纹）并推送状态仓</td><td>服务端</td></tr>
+    </table>
+    <p class="op-note">注意：verify 之后请勿改动平台仓任何跟踪文件（指纹漂移会导致入库失败）；CLI 默认超时 60s，超时先看账本再决定是否补救（幂等）。</p>
+    <div class="op-row" style="margin-top:10px;">
+      <button class="btn small" type="button">确认关闭并入库</button>
+      <button class="btn small ghost" type="button">取消</button>
+    </div>
+  </div>
+
+  <h2>提交报告（agent-t6，随提案入账）</h2>
+  <div class="feed-detail">
+    <p><strong>实现了什么：</strong>ship 动词全流程（catalog 六要素 + 授权 + task.shipped 幂等 + 指纹比对 + CLI 本机入库）；refreeze 补卡；债务 #11 四案；AC-16 执行者归因。</p>
+    <p><strong>验证：</strong>15 案机验全绿（v4 字面环境：可弃置克隆 + 平台仓 + 8126 自引用）；全量回归 38/38。</p>
+    <p><strong>偏差：</strong>夹具笔误 1 项按语义实现并登记 refreeze v3（已解决）。<strong>协作请求：</strong>operator sync ×2。</p>
+  </div>
+
+  <h2>验收卡（冻结版本 v1，16 条）</h2>
+  <table>
+    <tr><th style="width:70px;">AC</th><th style="width:80px;">强度</th><th>文本</th></tr>
+    <tr><td><code>AC-01</code></td><td>must</td><td>ship 入 catalog（六要素）+ openapi；授权（匿名 401 / sigt 403 / 非 Done 拒绝）……</td></tr>
+    <tr><td><code>AC-05</code></td><td>must</td><td>CLI ship 本机 add/commit/push，提交信息含 task_id，干净幂等 noop……</td></tr>
+    <tr><td><code>AC-11</code></td><td>must【人工】</td><td>人审：设计稿 v0.9 债务编号核对 + 真人旅程走查。</td></tr>
+    <tr><td><code>AC-16</code></td><td>must</td><td>执行者归因：actor=令牌签发人、on_behalf_of=执行者，self_review 以执行者判定……</td></tr>
+  </table>
+
+  <h2 id="timeline">事件时间线</h2>
+  <ul class="feed">
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T07:14:37Z">11-10 07:14</span>
+      <span class="feed-body"><details>
+        <summary><span class="feed-actor">agent-t6</span> 提交验收<span class="chip">报告 + 证据 7 件</span><span class="chip state">In Progress → Implemented</span></summary>
+        <div class="feed-detail"><p>报告摘要见上方「提交报告」区（页面从提案 payload 渲染，不入账重复内容）。</p></div>
+      </details></span>
+    </li>
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T06:46:21Z">11-10 06:46</span>
+      <span class="feed-body"><span class="feed-actor">agent-t6</span> 领取任务，租约至 11-11<span class="chip state">Ready → In Progress</span></span>
+    </li>
+    <li class="feed-item">
+      <span class="feed-time" title="2026-11-10T06:34:26Z">11-10 06:34</span>
+      <span class="feed-body"><span class="feed-actor">nfsnyy</span> 冻结规格 v1（H1/H2 双签），任务进入 Ready<span class="chip state">Draft → Ready</span></span>
+    </li>
+  </ul>
+</div>
+</body>
+</html>

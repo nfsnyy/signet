@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>signet 用户设置</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<div class="topbar"><span class="brand">signet<span class="repo">signet-dev-state</span></span><nav><a href="index.html">概况</a><a href="tasks.html">任务</a><a href="requirements.html">需求</a></nav><span class="user">nfsnyy</span></div>
+<div class="crumbs"><a href="index.html">概况</a> / 用户设置</div>
+<div class="page">
+  <h1>用户设置 · nfsnyy</h1>
+  <p class="muted">登录只给身份（无角色）。本页管理你的<strong>个人访问令牌（PAT）</strong>——agent 无自有账号，PAT 本质是你对某个 session 的授权。</p>
+
+  <div class="design-note">
+    <strong>两种凭证的分工（别混用）</strong>
+    <ul>
+      <li><strong>sigt 任务令牌</strong>：在任务详情页「接取/分配」时签发，绑定 task + 你 + 执行者标签，仅对该任务有效——执行任务用。</li>
+      <li><strong>PAT 个人访问令牌</strong>：本页签发，绑定你 + scope + 执行者标签——起草需求、发消息等接口动作用。</li>
+      <li>归因双字段随凭证落账：<code>actor=你</code>（问责）+ <code>on_behalf_of=执行者标签</code>（归属）。</li>
+      <li><strong>confirm / 签署类闸门只认你本人登录</strong>——PAT 与 sigt 都不可代过；令牌用毕即吊销，session 关了令牌也别留着。</li>
+    </ul>
+  </div>
+
+  <h2>我的 PAT</h2>
+  <table>
+    <tr><th>名称 / 执行者标签</th><th>scope</th><th style="width:110px;">创建</th><th style="width:100px;">过期</th><th style="width:90px;">最近使用</th><th style="width:90px;">状态</th><th style="width:80px;"></th></tr>
+    <tr><td>需求起草 · spec-t7</td><td><code>requirement:create,update,submit</code></td><td>11-10</td><td>11-11</td><td>10 分钟前</td><td><span class="badge done">活跃</span></td><td><button class="btn small danger" type="button">吊销</button></td></tr>
+    <tr><td>信箱联调 · agent-t6</td><td><code>message:send</code>（预留）</td><td>11-09</td><td>11-09</td><td>—</td><td><span class="badge void">已吊销</span></td><td><span class="muted">—</span></td></tr>
+  </table>
+
+  <h2>生成新 PAT</h2>
+  <form class="card">
+    <label>名称 / 执行者标签（*，归属落账用，如 spec-t7）</label><input required placeholder="这个令牌给谁用、干什么">
+    <label>scope（*，最小授权）</label>
+    <div class="op-row" style="margin:4px 0;">
+      <label style="font-weight:400;"><input type="checkbox" checked> requirement:create</label>
+      <label style="font-weight:400;"><input type="checkbox" checked> requirement:update</label>
+      <label style="font-weight:400;"><input type="checkbox" checked> requirement:submit</label>
+      <label style="font-weight:400;"><input type="checkbox"> message:send（预留）</label>
+    </div>
+    <label>有效期</label>
+    <select><option>24 小时</option><option selected>7 天</option><option>30 天</option></select>
+    <button class="btn" type="button">生成</button>
+    <p class="hint">令牌只在生成时完整显示一次，请立即复制进派活卡交给 session；平台侧仅存散列。</p>
+  </form>
+
+  <div class="op-area" style="border-left:4px solid var(--accent);">
+    <h3>生成结果（仅显示一次）</h3>
+    <pre>pat.v1.nfsnyy.scope-requirement.create,update,submit.label-spec-t7.exp-20261117.sig-9f3c…</pre>
+    <div class="op-row">
+      <button class="btn small" type="button">复制令牌</button>
+      <a class="btn small ghost" href="requirement-new.html">回到需求起草流</a>
+    </div>
+  </div>
+</div>
+</body>
+</html>
