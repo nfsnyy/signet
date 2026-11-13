@@ -1,6 +1,7 @@
 import html
 import json
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -33,12 +34,14 @@ from ..service import (
     normalize_req_items,
     record_pat_event,
     resolve_spec_asset,
+    resolve_task_evidence,
     status,
     submit,
     submit_authoritative,
     submit_requirement,
     synchronize,
     task_log,
+    unique_evidence_name,
     update_requirement,
     validate_requirement_derive,
 )
@@ -346,6 +349,11 @@ def authenticate_header(authorization):
         session = authn.find_session(value)
         if session:
             return {"kind": "user", "actor": session["user"], "task": None, "via": "bearer"}, None
+        payload = authn.verify_sigt(value)
+        if payload is not None:
+            # Bearer 形态的能力令牌：sigt 经 Bearer 传输同样识别（与 sigt scheme 同构），
+            # 供任务绑定类读端点按 sigt 任务范围做授权分流。
+            return {"kind": "sigt", "actor": payload["actor"], "task": payload["task"], "via": "sigt"}, None
         return None, None
     if scheme == "sigt" and value:
         payload = authn.verify_sigt(value)
@@ -492,6 +500,10 @@ def create_app(default_repo=None):
                 rest = path[len("/api/tasks/"):]
                 parts = tuple(part for part in rest.split("/") if part)
                 if parts[1:] in PUBLIC_TASK_READ_SUFFIXES and parts[0]:
+                    return await call_next(request)
+                # REQ-2 证据下载：匿名对清单外/穿越名的请求须得到 404/4xx 而非 401，
+                # 授权下沉到端点内（先解析名与路径，再验凭据；有效名匿名才 401）。
+                if len(parts) >= 2 and parts[1] == "evidence":
                     return await call_next(request)
             context, auth_error = authenticate_header(request.headers.get("Authorization"))
             if auth_error is not None:
@@ -860,6 +872,64 @@ def create_app(default_repo=None):
         asset_path = resolve_spec_asset(repository, metadata, name)
         return Response(content=asset_path.read_bytes(), media_type="application/octet-stream")
 
+    def evidence_endpoint_auth(request, task_id):
+        """证据端点内授权：镜像中间件凭据解析（Bearer 会话/PAT/sigt + cookie 会话），
+         anonymous 401 / PAT 403 / 他任务 sigt 403；正常返回 None。"""
+        context, auth_error = authenticate_header(request.headers.get("Authorization"))
+        if auth_error is not None:
+            status_code, payload = auth_error
+            return JSONResponse(status_code=status_code, content=payload)
+        if context is None:
+            cookie_token = request.cookies.get(authn.SESSION_COOKIE)
+            cookie_session = authn.find_session(cookie_token) if cookie_token else None
+            if cookie_session:
+                context = {"kind": "user", "actor": cookie_session["user"], "task": None, "via": "cookie"}
+        if context is None:
+            return JSONResponse(
+                status_code=401,
+                content=error_payload("auth.required", "valid credentials are required for this endpoint"),
+            )
+        if context["kind"] == "pat":
+            return JSONResponse(
+                status_code=403,
+                content=error_payload("authz.pat_scope_denied", "PAT 不可用于证据下载端点"),
+            )
+        if context["kind"] == "sigt" and context["task"] != task_id:
+            return JSONResponse(
+                status_code=403,
+                content=error_payload("authz.task_mismatch", f"token is bound to task {context['task']}, not {task_id}"),
+            )
+        return None
+
+    @app.get("/api/tasks/{task_id}/evidence/{name:path}")
+    def task_evidence_endpoint(request: Request, task_id: str, name: str):
+        # REQ-2：登录用户 Bearer/cookie 可读任意任务证据（200）；本任务 sigt 200、他任务 sigt 403；
+        # 匿名对有效名 401；清单外 404；穿越 4xx 且不读仓外文件。名与路径解析先于授权。
+        repository = resolve_repo(None)
+        load_authoritative_task(repository, task_id)
+        evidence_path = resolve_task_evidence(repository, task_id, name)
+        auth_failure = evidence_endpoint_auth(request, task_id)
+        if auth_failure is not None:
+            return auth_failure
+        return Response(content=evidence_path.read_bytes(), media_type="application/octet-stream")
+
+    def stage_workspace_evidence(uploaded_paths, workspace):
+        """REQ-1：上传证据落工作区 evidence/ 持久化。上传本体在请求级临时目录、
+        随请求销毁；提案 sync 阶段需按持久路径取字节，不经 staging 会在 sync 时
+        报 submit.evidence_missing。重名加短后缀，不覆盖工作区既有文件。"""
+        target_dir = Path(workspace) / "evidence"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        staged = []
+        taken = {entry.name for entry in target_dir.iterdir()}
+        for path in uploaded_paths:
+            source = Path(path)
+            name = unique_evidence_name(source.name or "evidence", taken)
+            taken.add(name)
+            target = target_dir / name
+            shutil.copyfile(source, target)
+            staged.append(str(target))
+        return staged
+
     @app.post("/api/tasks/{task_id}/submission")
     def submission_endpoint(
         request: Request,
@@ -877,6 +947,7 @@ def create_app(default_repo=None):
             evidence_paths = [save_upload(item, temporary, "evidence") for item in evidence]
             if workspace:
                 require_workspace_lease(workspace, task_id, context["actor"])
+                evidence_paths = stage_workspace_evidence(evidence_paths, workspace)
                 return ok(submit(workspace, context["actor"], context["actor"], report_path, evidence_paths))
             # 无工作区的编排直通：凭据必须是绑定到本任务的 sigt（中间件已做任务匹配），
             # 与 claim_authoritative 对称直接改写权威账本。AC-16：on_behalf_of 记录执行者。

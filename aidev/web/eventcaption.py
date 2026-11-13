@@ -207,6 +207,29 @@ def _leaf_rows(prefix, value):
     return []
 
 
+_EXTERNAL_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def _is_external_reference(path):
+    """REQ-3 判定：盘符形态（C:\…）、POSIX 绝对（/…）、UNC（\\…）一律视为仓外引用。"""
+    text = str(path or "")
+    return bool(_EXTERNAL_PATH_RE.match(text)) or text.startswith(("/", "\\"))
+
+
+def _evidence_row(index, item):
+    """task.submitted 证据行（REQ-3）：仓内相对路径渲染 basename+短码+全路径；
+    历史遗留本地绝对路径原样展示并标注「外部引用（未入库）」。"""
+    if not isinstance(item, dict):
+        return f"证据 {index}", str(item)
+    path = str(item.get("path") or "-")
+    digest = str(item.get("sha256") or "")
+    digest_part = f"（sha256 {digest[:8]}…）" if digest else ""
+    if _is_external_reference(path):
+        return f"证据 {index}", f"{path}{digest_part}〔外部引用（未入库）〕"
+    base_name = path.replace("\\", "/").rsplit("/", 1)[-1] or path
+    return f"证据 {index}", f"{base_name}{digest_part}〔仓内路径 {path}〕"
+
+
 def event_detail_rows(event):
     """时间线展开区的结构化负载：字段化 (标签, 文本) 行列表。
 
@@ -244,12 +267,8 @@ def event_detail_rows(event):
             rows.append(("偏差", f"{len(report['deviations'])} 项（见报告）"))
         evidence = payload.get("evidence") or []
         for index, item in enumerate(evidence, start=1):
-            if isinstance(item, dict):
-                path = str(item.get("path") or "-")
-                digest = str(item.get("sha256") or "")
-                rows.append((f"证据 {index}", f"{path}（sha256 {digest[:12]}…）" if digest else path))
-            else:
-                rows.append((f"证据 {index}", str(item)))
+            label, text = _evidence_row(index, item)
+            rows.append((label, text))
         return rows
 
     if etype == "task.shipped":
