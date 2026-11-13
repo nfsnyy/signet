@@ -17,6 +17,10 @@ from .vetoes import approved_veto_for, classify_refreeze, latest_vetoes, veto_lo
 
 VALID_STRENGTHS = {"must", "must-not", "safety-veto"}
 VALID_CONTRACT_TYPES = {"baseline", "target"}
+CREDENTIAL_FAMILIES = ("anonymous", "user_token", "sigt", "session_cookie")
+VALID_ENDPOINT_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+SCHEMA_SUBSET_TYPES = {"object", "array", "string", "integer", "number", "boolean", "null"}
+SCHEMA_SUBSET_KEYWORDS = {"type", "required", "properties", "items", "const"}
 
 
 def repository_lock(repository, name):
@@ -261,6 +265,158 @@ def recover_frozen_asset(repository, contract, asset):
     return None
 
 
+def _interfaces_invalid(message, details=None):
+    raise PlatformError("c2.interfaces_invalid", message, details=details or None)
+
+
+def _validate_schema_subset(schema, where):
+    """interfaces 内的 JSON schema 子集良构校验：仅允许 type/required/properties/items/const；
+    type ∈ 七类；required 为字符串列表且 ⊆ properties 键。"""
+    if not isinstance(schema, dict):
+        _interfaces_invalid(f"{where} must be an object")
+    unknown = set(schema) - SCHEMA_SUBSET_KEYWORDS
+    if unknown:
+        _interfaces_invalid(f"{where} has unsupported schema keywords: {sorted(unknown)}")
+    schema_type = schema.get("type")
+    if schema_type is not None and schema_type not in SCHEMA_SUBSET_TYPES:
+        _interfaces_invalid(f"{where}.type must be one of {sorted(SCHEMA_SUBSET_TYPES)}")
+    required = schema.get("required")
+    properties = schema.get("properties")
+    if required is not None:
+        if not isinstance(required, list) or any(not isinstance(item, str) for item in required):
+            _interfaces_invalid(f"{where}.required must be a list of strings")
+        if properties is not None:
+            if not isinstance(properties, dict):
+                _interfaces_invalid(f"{where}.properties must be an object")
+            missing = [item for item in required if item not in properties]
+            if missing:
+                _interfaces_invalid(f"{where}.required must be a subset of properties keys: {missing}")
+    if properties is not None:
+        if not isinstance(properties, dict):
+            _interfaces_invalid(f"{where}.properties must be an object")
+        for key, subschema in properties.items():
+            _validate_schema_subset(subschema, f"{where}.properties.{key}")
+    items = schema.get("items")
+    if items is not None:
+        _validate_schema_subset(items, f"{where}.items")
+
+
+def _validate_auth_matrix(auth, where):
+    if not isinstance(auth, dict):
+        _interfaces_invalid(f"{where}.auth must be an object")
+    if set(auth) != set(CREDENTIAL_FAMILIES):
+        _interfaces_invalid(f"{where}.auth must declare exactly the credential families: {sorted(CREDENTIAL_FAMILIES)}")
+    for family, value in auth.items():
+        codes = value if isinstance(value, list) else [value]
+        if not codes:
+            _interfaces_invalid(f"{where}.auth.{family} must not be empty")
+        for code in codes:
+            if not isinstance(code, int) or isinstance(code, bool) or not 100 <= code <= 599:
+                _interfaces_invalid(f"{where}.auth.{family} must be 100-599 status code(s)")
+
+
+def _required_interfaces_string(item, key, where):
+    value = item.get(key)
+    if not isinstance(value, str) or not value.strip():
+        _interfaces_invalid(f"{where}.{key} must be a non-empty string")
+    return value
+
+
+def validate_interfaces(interfaces):
+    """AC-01/REQ-1：interfaces 声明 schema 良构校验（并入 freeze/refreeze 既有门链）。
+
+    结构非法 → c2.interfaces_invalid；声明间冲突（endpoint id、(method,path)、
+    form page、event_type 重复）→ c2.interfaces_conflict。既有键语义不变。
+    """
+    if not isinstance(interfaces, dict):
+        _interfaces_invalid("interfaces must be an object")
+    version = interfaces.get("version")
+    if not isinstance(version, int) or isinstance(version, bool) or version != 1:
+        _interfaces_invalid("interfaces.version must be 1")
+    endpoints = interfaces.get("endpoints")
+    if endpoints is not None:
+        if not isinstance(endpoints, list):
+            _interfaces_invalid("interfaces.endpoints must be a list")
+        endpoint_ids = set()
+        method_paths = set()
+        for endpoint in endpoints:
+            if not isinstance(endpoint, dict):
+                _interfaces_invalid("each endpoint must be an object")
+            endpoint_id = _required_interfaces_string(endpoint, "id", "endpoint")
+            method = endpoint.get("method")
+            if not isinstance(method, str) or method not in VALID_ENDPOINT_METHODS:
+                _interfaces_invalid(f"endpoint {endpoint_id}.method must be one of {sorted(VALID_ENDPOINT_METHODS)}")
+            path = endpoint.get("path")
+            if not isinstance(path, str) or not path.startswith("/"):
+                _interfaces_invalid(f"endpoint {endpoint_id}.path must be an absolute path")
+            _validate_auth_matrix(endpoint.get("auth"), f"endpoint {endpoint_id}")
+            responses = endpoint.get("responses")
+            if not isinstance(responses, dict) or "success" not in responses or "rejection" not in responses:
+                _interfaces_invalid(f"endpoint {endpoint_id}.responses must declare success and rejection")
+            for shape in ("success", "rejection"):
+                _validate_schema_subset(responses[shape], f"endpoint {endpoint_id}.responses.{shape}")
+            if endpoint_id in endpoint_ids:
+                raise PlatformError("c2.interfaces_conflict", f"duplicate endpoint id: {endpoint_id}")
+            endpoint_ids.add(endpoint_id)
+            method_path = (method, path)
+            if method_path in method_paths:
+                raise PlatformError("c2.interfaces_conflict", f"duplicate endpoint (method, path): {method} {path}")
+            method_paths.add(method_path)
+    forms = interfaces.get("forms")
+    if forms is not None:
+        if not isinstance(forms, list):
+            _interfaces_invalid("interfaces.forms must be a list")
+        pages = set()
+        for form in forms:
+            if not isinstance(form, dict):
+                _interfaces_invalid("each form must be an object")
+            form_id = _required_interfaces_string(form, "id", "form")
+            page = form.get("page")
+            if not isinstance(page, str) or not page.startswith("/"):
+                _interfaces_invalid(f"form {form_id}.page must be an absolute path")
+            fields = form.get("fields")
+            if not isinstance(fields, list):
+                _interfaces_invalid(f"form {form_id}.fields must be a list")
+            for field in fields:
+                if not isinstance(field, dict):
+                    _interfaces_invalid(f"form {form_id}.fields items must be objects")
+                _required_interfaces_string(field, "name", f"form {form_id}.field")
+                _required_interfaces_string(field, "type", f"form {form_id}.field")
+                if not isinstance(field.get("required"), bool):
+                    _interfaces_invalid(f"form {form_id}.field.required must be a boolean")
+            if page in pages:
+                raise PlatformError("c2.interfaces_conflict", f"duplicate form page: {page}")
+            pages.add(page)
+    events = interfaces.get("events")
+    if events is not None:
+        if not isinstance(events, list):
+            _interfaces_invalid("interfaces.events must be a list")
+        event_types = set()
+        for event in events:
+            if not isinstance(event, dict):
+                _interfaces_invalid("each event must be an object")
+            event_id = _required_interfaces_string(event, "id", "event")
+            _required_interfaces_string(event, "event_type", f"event {event_id}")
+            payload = event.get("payload")
+            if not isinstance(payload, dict) or "type" not in payload:
+                _interfaces_invalid(f"event {event_id}.payload must be an object declaring type")
+            _validate_schema_subset(payload, f"event {event_id}.payload")
+            event_type = event["event_type"]
+            if event_type in event_types:
+                raise PlatformError("c2.interfaces_conflict", f"duplicate event_type: {event_type}")
+            event_types.add(event_type)
+
+
+def validate_interfaces_presence(metadata, contract):
+    """AC-03/REQ-3：接口类任务（task.md frontmatter interface_class 为真，缺省 false）
+    freeze/refreeze 必须携带非空 interfaces 声明——缺省或为 null → c2.interfaces_missing。
+    非接口类任务 interfaces 可显式 null（亦容许携带声明）。"""
+    if not metadata.get("interface_class"):
+        return
+    if contract.get("interfaces") is None:
+        raise PlatformError("c2.interfaces_missing", "interface-class task must declare a non-null contract.interfaces section")
+
+
 def validate_three_piece(card, contract, mapping, operation_source, contract_file):
     validate_mapping(card, contract, mapping)
     validate_operations(contract, operation_source, operation_source)
@@ -268,6 +424,9 @@ def validate_three_piece(card, contract, mapping, operation_source, contract_fil
     contract_type = contract.get("contract_type")
     if contract_type not in VALID_CONTRACT_TYPES:
         raise PlatformError("c4.invalid_contract_type", "contract_type must be baseline or target")
+    interfaces = contract.get("interfaces")
+    if interfaces is not None:
+        validate_interfaces(interfaces)
 
 
 def validate_traceability(repository, metadata, card):
@@ -401,6 +560,7 @@ def freeze_task(repository, task_id, workspace, card_file, contract_file, mappin
         contract = read_json_document(contract_file, "c2.invalid_contract")
         mapping = read_json_document(mapping_file, "c1.invalid_mapping")
         validate_three_piece(card, contract, mapping, operation_source, contract_file)
+        validate_interfaces_presence(metadata, contract)
         validate_traceability(repository, metadata, card)
         spec_directory.mkdir(parents=True)
         sources = {
@@ -491,6 +651,7 @@ def refreeze_task(repository, task_id, workspace, card_file, contract_file, mapp
         contract = read_json_document(contract_file, "c2.invalid_contract")
         mapping = read_json_document(mapping_file, "c1.invalid_mapping")
         validate_three_piece(card, contract, mapping, operation_source, contract_file)
+        validate_interfaces_presence(metadata, contract)
         analysis = {"downgrade_required": False} if initial_freeze else classify_refreeze(repository, spec_id, old_version, card, contract, mapping)
         veto = None
         if analysis["downgrade_required"]:

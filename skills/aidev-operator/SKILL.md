@@ -87,6 +87,12 @@ python aidev-operator.py freeze --repo <状态仓> --task-id <id> --workspace <�
   --acceptance-card contract/acceptance-card.json --contract contract/contract.json \
   --mapping contract/mapping.json --h1-actor nfsnyy --h2-actor nfsnyy
 
+# 接口类任务冻结（T12 起）：contract 必须携带非空 interfaces 段，缺省/null → c2.interfaces_missing 拒冻
+# 判型信号 = task.md frontmatter interface_class（建任务/派生时按「新增/变更端点、表单、事件负载」标注，缺省 false）
+# 声明范式（version 1；endpoints 四凭据族 auth 矩阵 + responses.success/rejection 双形态；
+#           forms 字段三键 name/type/required；events payload schema 子集 type/required/properties/items/const）
+# 与完整示例见 doc/三件套编写规范.md §2.1（示例 = T12 冻结契约 spec-fb64d0cb 的 interfaces 段）。
+
 # verify / close
 python aidev-operator.py verify --repo <状态仓> --task-id <id> --execute \
   --manual-results <人审json> --verifier operator --confirmed-by nfsnyy

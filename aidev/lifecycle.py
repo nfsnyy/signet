@@ -177,6 +177,31 @@ def materialize_machine_evidence(repository, task_id, document):
     return extra_paths
 
 
+def run_conformance_step(repository, task_id, metadata):
+    """AC-02/REQ-2：verify --execute 的 conformance 阶段——按冻结 interfaces 声明
+    对环境默认活体面（in-proc ASGI app）逐项 diff，repository 供事件对账。
+
+    interfaces 缺省/null 的任务零输出跳过（无记录、不影响其余阶段）。探测凭据
+    进程内合成：临时探测会话（user_token/session_cookie 两种运载）、为在验任务
+    现签的 sigt。返回 findings 列表（空 = 全合或跳过）。
+    """
+    _spec_directory, contract, _mapping = frozen_contract(repository, metadata)
+    interfaces = contract.get("interfaces")
+    if not interfaces:
+        return []
+    from . import authn
+    from .conformance import check_contract, configure_probes
+    from .web.app import create_app
+    probe_session = authn.create_session("conformance-probe")
+    sigt = authn.mint_sigt(task_id, "conformance-probe", str(repository))
+    app = create_app(str(Path(repository).resolve()))
+    configure_probes(user_token=probe_session, sigt=sigt, session_cookie=probe_session, task_id=task_id)
+    try:
+        return check_contract(interfaces, app, str(repository))
+    finally:
+        configure_probes()
+
+
 def verify_task(repository, task_id, verifier, confirmed_by, results_file=None, execute=False, manual_results_file=None, push=False):
     repository = ensure_repository(repository)
     if (results_file is None) == (execute is False):
@@ -204,6 +229,14 @@ def verify_task(repository, task_id, verifier, confirmed_by, results_file=None, 
         implementer = latest_claim_implementer(repository, task_id)
         if implementer and (verifier == implementer or confirmed_by == implementer):
             raise PlatformError("verify.self_review", "implementer cannot verify or confirm their own work")
+        if execute:
+            findings = run_conformance_step(repository, task_id, metadata)
+            if findings:
+                raise PlatformError(
+                    findings[0]["code"],
+                    "conformance check failed against the live surface",
+                    details={"findings": findings},
+                )
         extra_paths = materialize_machine_evidence(repository, task_id, document) if execute else []
         metadata["state"] = "Verified"
         metadata["updated_at"] = utc_now()
