@@ -116,6 +116,7 @@ python aidev-operator.py close --repo <状态仓> --task-id <id> --decision acce
 5. mapping 一案一行（1:1）；strength ∈ must/must-not/safety-veto（人工项 = must + manual:true）；`allowed_env` 含标准 9 项 `PATH/SYSTEMROOT/SYSTEMDRIVE/WINDIR/USERPROFILE/HOMEDRIVE/HOMEPATH/TEMP/TMP`（债务 #21）。
 6. 冻结 spec 目录复跑用例后 `find . -name __pycache__` 清杂再 push。
 7. 权威 task.md 正文非占位符（债务 #30②）：起草任务 freeze 后账本正文仍是"待补充"=断链复发——当场回填（annex/起草工作区 task-draft.md 为权威来源，回填后对账 contract.assets 钉值）并追 #30 吞并修复排期。
+8. 用例时长 lint（T13 起，起草/派活对账条款）：按探针数与子进程调用逐案估算净室时长，SIGNET_CASE_TIMEOUT 缺省 60s 下预估 >45s 必须拆案，并在案题/正文写明拆分理由（范式 = T12 case-interfaces-schema 按 argv 分 core/auth/shape/conflict 四部，拆后探针全集不变）；调大 env 或单案上限不取消缺省口径下的 45s 纪律——本条只约束编写与派活对账，不新增运行期门禁。
 
 ## 8. 签署与验收的准入纪律
 

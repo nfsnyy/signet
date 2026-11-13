@@ -227,6 +227,24 @@ def validate_environment_and_cases(contract, contract_file):
             raise PlatformError("c3.asset_hash_mismatch", f"asset hash does not match contract: {asset}")
 
 
+TASK_DRAFT_ASSET = "task-draft.md"
+
+
+def merged_task_draft(spec_directory, contract):
+    """REQ-1 吞并：contract 经 environment.dependency_files 声明 task-draft.md 且已按
+    钉值带入冻结目录时，返回 (吞并正文, task_draft 事件负载)；无声明或未带入返回
+    None——占位正文原样保留、事件负载省略该键（不新增事件类型）。"""
+    environment = contract.get("environment") or {}
+    if TASK_DRAFT_ASSET not in (environment.get("dependency_files") or []):
+        return None
+    draft_path = Path(spec_directory) / TASK_DRAFT_ASSET
+    if not draft_path.is_file():
+        return None
+    digest = sha256_file(draft_path)
+    body = draft_path.read_text(encoding="utf-8")
+    return body, {"path": TASK_DRAFT_ASSET, "sha256": digest}
+
+
 def copy_contract_assets(contract, contract_file, spec_directory, copied, repository=None):
     source_directory = Path(contract_file).resolve().parent
     for asset in contract_asset_paths(contract):
@@ -576,6 +594,11 @@ def freeze_task(repository, task_id, workspace, card_file, contract_file, mappin
             copied.append(target.relative_to(repository))
             pin[key] = {"version": version, "sha256": sha256_file(target)}
         copy_contract_assets(contract, contract_file, spec_directory, copied, repository)
+        merged_draft = merged_task_draft(spec_directory, contract)
+        if merged_draft is not None:
+            body, task_draft_payload = merged_draft
+        else:
+            task_draft_payload = None
         baseline_records = []
         baseline_paths = []
         if contract.get("contract_type") == "baseline":
@@ -591,8 +614,11 @@ def freeze_task(repository, task_id, workspace, card_file, contract_file, mappin
         metadata["spec_pin"] = pin
         metadata["updated_at"] = now
         metadata["state"] = "Ready"
+        frozen_payload = {"spec_id": spec_id, "version": version, "spec_pin": pin}
+        if task_draft_payload is not None:
+            frozen_payload["task_draft"] = task_draft_payload
         events.extend([
-            make_event("specification.frozen", task_id, h2_actor, h2_actor, state, "Ready", payload={"spec_id": spec_id, "version": version, "spec_pin": pin}),
+            make_event("specification.frozen", task_id, h2_actor, h2_actor, state, "Ready", payload=frozen_payload),
             make_event("task.ready", task_id, h2_actor, h2_actor, state, "Ready", payload={"spec_id": spec_id, "version": version}),
         ])
         write_task(path, metadata, body)
@@ -677,6 +703,11 @@ def refreeze_task(repository, task_id, workspace, card_file, contract_file, mapp
             copied.append(target.relative_to(repository))
             new_pin[key] = {"version": version, "sha256": sha256_file(target)}
         copy_contract_assets(contract, contract_file, spec_directory, copied, repository)
+        merged_draft = merged_task_draft(spec_directory, contract)
+        if merged_draft is not None:
+            body, task_draft_payload = merged_draft
+        else:
+            task_draft_payload = None
         baseline_records = []
         baseline_paths = []
         if contract.get("contract_type") == "baseline":
@@ -708,7 +739,10 @@ def refreeze_task(repository, task_id, workspace, card_file, contract_file, mapp
         metadata["void_reason"] = None
         metadata["updated_at"] = now
         metadata["state"] = "Ready"
-        events.append(make_event("specification.refrozen", task_id, h2_actor, h2_actor, before, "Ready", payload={"spec_id": spec_id, "old_version": old_version, "version": version, "supersedes": old_version, "reason": reason, "released_lease": released_lease, "spec_pin": new_pin}))
+        refrozen_payload = {"spec_id": spec_id, "old_version": old_version, "version": version, "supersedes": old_version, "reason": reason, "released_lease": released_lease, "spec_pin": new_pin}
+        if task_draft_payload is not None:
+            refrozen_payload["task_draft"] = task_draft_payload
+        events.append(make_event("specification.refrozen", task_id, h2_actor, h2_actor, before, "Ready", payload=refrozen_payload))
         if before != "Ready":
             events.append(make_event("task.ready", task_id, h2_actor, h2_actor, before, "Ready", payload={"spec_id": spec_id, "version": version, "refrozen": True}))
         extra_paths = []

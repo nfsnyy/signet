@@ -520,6 +520,19 @@ def _card_block(detail):
     )
 
 
+def _unarchived_body_hint(detail):
+    """REQ-1 历史口径：正文仍是 init-task 占位（冻结时无 task-draft.md 资产吞并）时，
+    在既有任务说明渲染分支提示无说明存档；已有正文（含 annex 回填）不误报。"""
+    body = detail.get("body")
+    title = detail.get("title")
+    if not isinstance(body, str) or not isinstance(title, str):
+        return ""
+    placeholder = f"# {title}\n\n## 任务说明\n\n待补充。"
+    if body.strip() != placeholder:
+        return ""
+    return "<p class=\"hint\">历史任务无说明存档：该任务冻结时未携带 task-draft.md，任务说明仍为占位。</p>"
+
+
 def render_task_detail(user, detail):
     """任务详情页：metadata 卡 + 任务说明分区渲染 + 钉扎验收卡（折叠）+ 交接/派活卡 + 时间线。"""
     task_id = str(detail.get("task_id") or "")
@@ -557,6 +570,7 @@ def render_task_detail(user, detail):
               html.escape(requirement), _state_badge(state))
         + meta
         + "<h2>任务说明</h2>"
+        + _unarchived_body_hint(detail)
         + _render_document(detail.get("body"))
         + "<h2>验收卡</h2>"
         + _card_block(detail)

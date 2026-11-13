@@ -10,6 +10,28 @@ from .errors import PlatformError
 from .jsonio import read_json, sha256_file
 
 COMMAND_TIMEOUT_SECONDS = 60
+CASE_TIMEOUT_ENV = "SIGNET_CASE_TIMEOUT"
+
+
+def default_case_timeout():
+    """REQ-2：每案缺省上限取 runner 所在进程环境的 SIGNET_CASE_TIMEOUT，缺省或非法值回落 60s。"""
+    raw = os.environ.get(CASE_TIMEOUT_ENV)
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if value > 0:
+            return value
+    return COMMAND_TIMEOUT_SECONDS
+
+
+def case_timeout_seconds(case):
+    """REQ-2：cases[].timeout_seconds（正整数）单案覆盖优先，未声明回落 env/缺省 60s。"""
+    declared = case.get("timeout_seconds")
+    if isinstance(declared, int) and not isinstance(declared, bool) and declared > 0:
+        return declared
+    return default_case_timeout()
 
 
 def frozen_contract(repository, metadata):
@@ -48,7 +70,8 @@ def resolve_command(command, runner):
     return resolved
 
 
-def run_clean_command(command, cwd, environment):
+def run_clean_command(command, cwd, environment, timeout_seconds=None):
+    timeout = timeout_seconds if timeout_seconds is not None else default_case_timeout()
     result = subprocess.run(
         command,
         cwd=cwd,
@@ -57,7 +80,7 @@ def run_clean_command(command, cwd, environment):
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=COMMAND_TIMEOUT_SECONDS,
+        timeout=timeout,
         check=False,
     )
     return result.returncode, result.stdout, result.stderr
@@ -101,10 +124,11 @@ def execute_contract_cases(repository, metadata):
         for case in contract.get("cases", []):
             case_id = case["case_id"]
             command = resolve_command(case["command"], runner)
+            timeout_seconds = case_timeout_seconds(case)
             try:
-                returncode, stdout, stderr = run_clean_command(command, temporary, environment)
+                returncode, stdout, stderr = run_clean_command(command, temporary, environment, timeout_seconds=timeout_seconds)
             except subprocess.TimeoutExpired:
-                returncode, stdout, stderr = -1, "", f"command timed out after {COMMAND_TIMEOUT_SECONDS} seconds"
+                returncode, stdout, stderr = -1, "", f"command timed out after {timeout_seconds} seconds"
             expectation = case["expect"]
             passed = returncode == expectation["exit_code"]
             if "stdout_contains" in expectation:
