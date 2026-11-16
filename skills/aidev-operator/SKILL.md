@@ -53,7 +53,7 @@ python aidev-agent.py login --user nfsnyy --password '<口令，hints.md/口头�
 
 - Git Bash 环境变量路径一律 `C:/` 形态（`/c/...` 静默失效）。
 - **单机假设声明（api-remote-ready 落地前）**：`init-repository` / `init-task` / `freeze` / `refreeze` / `sync` 的 `--repo`、`--workspace` 与三件套路径均为**服务端本地路径**——这些动词仅当 CLI 与服务同机（或共享文件系统）时可用；跨机 operator 先 clone 平台仓到本机跑 CLI（ship 本就需要本机工作副本），但上述动词仍受服务端路径解析限制。根治在需求 `api-remote-ready`（REQ-1~3：逻辑标识 + 内容上传 + 客户端拉取）。
-- 8000 常驻服务：`SIGNET_STATE_REPO=<状态仓> SIGNET_PLATFORM_REPO=<平台仓> python -m aidev.web.server --port 8000`（后台）。**平台仓代码变更后必须重启才生效**；服务重启不动账本。
+- 8000 常驻服务：`SIGNET_STATE_REPO=<状态仓> SIGNET_PLATFORM_REPO=<平台仓> python -m aidev.web.server --port 8000`（后台）。**平台仓代码变更后必须重启才生效**；服务重启不动账本。**close --ship 后必须重启 8000 簿记服务**（仪式化防版本漂移；若 ship 前后平台仓代码内容零变更——如交付面未变的返场回合——可豁免并在 close 摘要注明）。verify/freeze/refreeze 等验收类动词执行前，先探针确认被测实例代码版本不早于本轮首个平台改动（stale-service 三连事故教训，根治=债务 #42 服务版本自检）。
 - commit 身份：`-c user.name='nfsnyy' -c user.email='nfsnyy@signet.local'`；签名约定：H1/H2 双签 nfsnyy（用户对话中明确"签"后代为执行）。
 
 ## 4. 任务生命周期仪式（每任务标准序列）
