@@ -463,6 +463,8 @@ def build_request(role, arguments, sigt_payload=None):
             files.append(("results", *read_upload(arguments.results, "verify.invalid_results")))
         if arguments.manual_results:
             files.append(("manual_results", *read_upload(arguments.manual_results, "verify.invalid_manual_results")))
+        if arguments.review_report:
+            files.append(("review_report", *read_upload(arguments.review_report, "verify.ai_review_invalid_report")))
         return "POST", f"/api/tasks/{arguments.task_id}/verify", fields, files
     if command == "reject":
         fields = present({"repo": arguments.repo, "category": arguments.category, "reason": arguments.reason, "actor": arguments.actor, "workspace": arguments.workspace, "push": str(arguments.push).lower()})
@@ -728,6 +730,7 @@ def parser_for(role):
         verify.add_argument("--results")
         verify.add_argument("--execute", action="store_true")
         verify.add_argument("--manual-results")
+        verify.add_argument("--review-report")
         verify.add_argument("--verifier", required=True)
         verify.add_argument("--confirmed-by", required=True)
         verify.add_argument("--push", action="store_true")

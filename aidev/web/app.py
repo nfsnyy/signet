@@ -1115,13 +1115,15 @@ def create_app(default_repo=None):
         push: bool = Form(False),
         results: UploadFile | None = File(None),
         manual_results: UploadFile | None = File(None),
+        review_report: UploadFile | None = File(None),
     ):
         check_actor_aliases({"verifier": verifier, "confirmed_by": confirmed_by})
         repository = operator_repo(repo)
         with tempfile.TemporaryDirectory(prefix="aidev-web-verify-") as temporary:
             results_path = save_upload(results, temporary, "results.json")
             manual_results_path = save_upload(manual_results, temporary, "manual-results.json")
-            return ok(verify_task(repository, task_id, verifier, confirmed_by, results_path, execute, manual_results_path, push))
+            review_report_path = save_upload(review_report, temporary, "ai-review-report.json")
+            return ok(verify_task(repository, task_id, verifier, confirmed_by, results_path, execute, manual_results_path, push, review_report_file=review_report_path))
 
     @app.post("/api/tasks/{task_id}/reject")
     def reject_endpoint(request: Request, task_id: str, body: RejectBody):
