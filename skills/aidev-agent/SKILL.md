@@ -121,6 +121,7 @@ operator 面动词（`init-repository/init-task/freeze/refreeze/sync/verify/reje
 
 - **经验教训**（后辈该怎么干活）→ 写工作区 `hints-proposal.md`（随手记，一条一行），submit 后由 operator 验收时评审合入状态仓 `hints.md`。
 - **改进点**（平台/项目该怎么改）→ 用 `enhancement` 动词登记，进 backlog 容器，operator 分拣。
+- **范围闸（#47）**：只能按冻结三件套实现与自验。发现合约外缺口时，记录证据并用 `enhancement` 登记，可给人分类建议；不得自行扩实现、把派活建议当契约或以新缺口拒绝提交。是否属于当前范围由人裁定；确需纳入时等待 operator 完成起草/refreeze，再按新 pin 执行。
 - 入场必读：状态仓根 `hints.md`（随任务包注入工作区）是本项目环境级经验的唯一入口；动手前先读。
 
 ## 附录 B：真人端到端旅程（交接协议实操）

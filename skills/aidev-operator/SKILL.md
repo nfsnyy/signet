@@ -127,6 +127,7 @@ python aidev-operator.py close --repo <状态仓> --task-id <id> --decision acce
   - 走查中：清单逐条注明数据前提；补一条故意失败路径（错误口令/越权访问），亲看错误信息是否人话。
   - 走查后：清场闸——删造数对象（任务/需求/账号 disable）、吊销临时凭据（revoke 落事件）、清场结果入 close 摘要。
 - close --ship 前给用户 close 摘要（验收结论 + ship 内容 + 影响），"确认"后执行；ship 后核对 task.shipped 的 commit_hash 与平台仓提交一致。
+- **验收范围闸（#47）**：验收与驳回只能依据冻结三件套；驳回必须引用具体 AC/case 及失败证据。走查辅助步骤、客户端预装假设或合约外新能力发现不得升格为额外 AC；先举证并向人提出分类建议，范围分类由人裁定。未违反冻结 must 的观察项登记 enhancement/新需求，不挡 verify/close；确需改变当前范围，由人明确决定后走起草/refreeze。
 
 ### 8.1 输出分轨（#32：发给人的 ≠ 发给 agent 的）
 
