@@ -71,6 +71,8 @@ python aidev-agent.py login --user nfsnyy --password '<口令，hints.md/口头�
   → 收尾：清 __pycache__ 等杂散 → disable agent-tN → 设计稿变更历史 + §15 补记
 ```
 
+**条件式 mockup 门**：新增页面、改变核心用户旅程、复杂交互或权限状态变化时，在起草三件套前先以低成本 HTML mockup/页面流程草图走查入口、信息、操作顺序及空/错/无权限状态；人确认后再起草并在验收卡引用。纯 API/CLI、内部重构与明确小修复不强制。mockup 只是规格输入，不替代行为用例和最终人工走查；若作为验收判定依据，须列入契约资产并随 freeze/refreeze 钉扎。
+
 ## 5. 关键命令模板
 
 ```bash
