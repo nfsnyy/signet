@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, model_validator
 
-from .. import authn, readmodel
+from .. import authn, distribution, readmodel
 from ..collaboration import collab_answer, collab_send, collaboration_overview
 from ..domain import lease_is_active, task_path, validate_actor_alias
 from ..errors import AuthorizationError, NotFoundError, PlatformError
@@ -20,6 +20,7 @@ from ..lifecycle import adjudicate_task, close_task, reject_task, ship_task, ver
 from ..service import (
     block,
     block_authoritative,
+    build_task_package,
     claim,
     claim_authoritative,
     claim_with_sigt,
@@ -51,7 +52,9 @@ from ..taskfile import read_task
 from ..vetoes import decide_veto, list_vetoes, propose_veto, settle_expired_vetoes
 
 ACTOR_FIELDS = ("actor", "on_behalf_of", "h1_actor", "h2_actor", "verifier", "confirmed_by")
-PUBLIC_PATHS = ("/api/health", "/api/login")
+PUBLIC_PATHS = ("/api/health", "/api/login", "/api/skill", "/api/norms", "/guide")
+# T15（AC-09）：公开面仅增 /api/skill、/api/norms 前缀与页面 /guide，其余端点匿名行为不变。
+PUBLIC_PATH_PREFIXES = ("/api/norms",)
 # T6 CRLF 用例固化的读面语义：任务详情与状态端点匿名可读（本机信任模型内），
 # 事件/写面仍需凭据；/api/tasks 列表与其余子路径保持守卫。
 PUBLIC_TASK_READ_SUFFIXES = {(), ("status",)}
@@ -63,6 +66,13 @@ OPERATOR_EXACT_PATHS = {
     ("GET", "/api/inbox"),
 }
 OPERATOR_TASK_SUFFIXES = ("/freeze", "/refreeze", "/verify", "/reject", "/close", "/ship", "/void", "/adjudication")
+
+
+def _is_public_path(path):
+    """T15 公开面判定：PUBLIC_PATHS 精确命中，或 PUBLIC_PATH_PREFIXES 前缀命中（/api/norms/*）。"""
+    if path in PUBLIC_PATHS:
+        return True
+    return any(path.startswith(prefix + "/") for prefix in PUBLIC_PATH_PREFIXES)
 
 
 def path_authorization(method, path):
@@ -83,7 +93,7 @@ LOGIN_PAGE = """<!doctype html>
 <link rel="stylesheet" href="/static/style.css"></head>
 <body>
 <div class="topbar"><span class="brand">signet</span>
-<nav><a href="/">概况</a><a href="/tasks">任务</a><a href="/requirements">需求</a></nav>
+<nav><a href="/">概况</a><a href="/tasks">任务</a><a href="/requirements">需求</a><a href="/guide">接入指南</a></nav>
 <span class="user">未登录</span></div>
 <div class="page" style="display:flex;justify-content:center;padding-top:80px;">
   <form method="post" action="/login" class="card">
@@ -105,7 +115,7 @@ _LOGIN_SHELL = """<!doctype html>
 <link rel="stylesheet" href="/static/style.css"></head>
 <body>
 <div class="topbar"><span class="brand">signet</span>
-<nav><a href="/">概况</a><a href="/tasks">任务</a><a href="/requirements">需求</a></nav>
+<nav><a href="/">概况</a><a href="/tasks">任务</a><a href="/requirements">需求</a><a href="/guide">接入指南</a></nav>
 <span class="user">未登录</span></div>
 <div class="page" style="display:flex;justify-content:center;padding-top:80px;">
   <div class="card" style="max-width:520px;border:1px solid #e5e7eb;border-radius:10px;padding:20px;">
@@ -495,7 +505,7 @@ def create_app(default_repo=None):
     @app.middleware("http")
     async def require_credentials(request, call_next):
         path = request.url.path
-        if path.startswith("/api/") and path not in PUBLIC_PATHS:
+        if path.startswith("/api/") and not _is_public_path(path):
             if request.method == "GET" and path.startswith("/api/tasks/") and "workspace" not in request.query_params:
                 rest = path[len("/api/tasks/"):]
                 parts = tuple(part for part in rest.split("/") if part)
@@ -547,6 +557,36 @@ def create_app(default_repo=None):
     @app.get("/api/health")
     def health():
         return {"status": "ok"}
+
+    # ------------------------------------------------------------------
+    # T15 skill 分发与平台可获取性（REQ-1/REQ-6）：EP-01 /api/skill、
+    # EP-02 /api/norms/{name}——匿名可读的只读分发面，同源同字节。
+    # ------------------------------------------------------------------
+
+    @app.get("/api/skill")
+    def skill_endpoint(request: Request):
+        document = distribution.read_skill()
+        return Response(
+            content=document["content"].encode("utf-8"),
+            media_type="text/plain; charset=utf-8",
+        )
+
+    @app.get("/api/norms/{name:path}")
+    def norm_endpoint(request: Request, name: str):
+        document = distribution.read_norm(None, name)
+        body = document["content"]
+        if isinstance(body, str):
+            body = body.encode("utf-8")
+        # X-Signet-Norm 携「{name} v{version}@{commit}」（AC-07）。HTTP 头值经
+        # latin-1 上线路由：非 ASCII 名（中文规范名）以 UTF-8 字节传输，客户端按
+        # UTF-8 解码即原样标识。
+        norm_label = f"{document['name']} v{document['version']}@{document['commit']}"
+        norm_label = norm_label.encode("utf-8").decode("latin-1")
+        return Response(
+            content=body,
+            media_type="text/plain; charset=utf-8",
+            headers={"X-Signet-Norm": norm_label},
+        )
 
     @app.post("/api/login")
     def api_login(response: Response, body: LoginBody):
@@ -794,6 +834,11 @@ def create_app(default_repo=None):
             raise NotFoundError("task.not_found", f"task does not exist: {task_id}")
         return HTMLResponse(pages.render_task_detail(session["user"], detail))
 
+    @app.get("/guide")
+    def guide_page(request: Request):
+        # T15/REQ-3/AC-03：接入指南——匿名可读（规范非机密、获取动作经 API）。
+        return HTMLResponse(pages.render_guide())
+
     @app.get("/login")
     def login_page(request: Request):
         accept = request.headers.get("Accept", "").lower()
@@ -838,6 +883,15 @@ def create_app(default_repo=None):
             return ok({**status(workspace), "task_id": task_id})
         metadata = load_authoritative_task(resolve_repo(None), task_id)
         return ok({"task": metadata, "inbox": [], "outbox_collab": [], "authoritative": True, "task_id": task_id})
+
+    @app.get("/api/tasks/{task_id}/package")
+    def task_package_endpoint(request: Request, task_id: str):
+        # T15/REQ-2/AC-02：只读幂等任务包读面（claims POST 不入 interfaces 声明，
+        # 为 conformance 提供探针安全的 GET 通路；匿名 401，三凭据族 200）。
+        repository = resolve_repo(None)
+        load_authoritative_task(repository, task_id)
+        metadata, body = read_task(task_path(repository, task_id))
+        return ok(build_task_package(repository, metadata, body))
 
     @app.get("/api/tasks/{task_id}/events")
     def events_endpoint(

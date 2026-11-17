@@ -23,6 +23,7 @@ NAV_ITEMS = (
     ("overview", "/", "概况"),
     ("tasks", "/tasks", "任务"),
     ("requirements", "/requirements", "需求"),
+    ("guide", "/guide", "接入指南"),
 )
 
 _BADGE_CLASSES = {
@@ -260,6 +261,33 @@ def _render_document(markdown):
         else:
             chunks.append(f"<h3>{html.escape(title)}</h3>{inner}")
     return "<section class=\"task-brief\">{}</section>".format("".join(chunks))
+
+
+def render_guide():
+    """接入指南（REQ-3/AC-03）：匿名可读——获取 skill / 放置到本机 skills 目录 /
+    登录并开启 session / 凭任务令牌领取任务；T8 骨架（topbar/h1+muted/无 JS），
+    获取动作一律经 API，无本地路径指引（AC-10 渠道红线）。"""
+    body = (
+        "<h1>接入指南</h1>"
+        "<p class=\"muted\">首次接入 signet 平台：三步拿到 skill 并开工；"
+        "获取动作一律经平台 API，无需任何本机先验文件。</p>"
+        "<div class=\"card\"><h2>第一步：获取 skill</h2>"
+        "<p>下载 <a href=\"/api/skill\" download=\"SKILL.md\">SKILL.md（GET /api/skill）</a>"
+        "：平台唯一事实源的当前"
+        "版本全文，首行为版本标识（版本随平台 commit 自动更新，漂移可检出）。</p></div>"
+        "<div class=\"card\"><h2>放置到本机 coder agent 的 skills 目录</h2>"
+        "<p>kimi-code：将下载的 SKILL.md 存至本机 <code>.kimi-code/skills/aidev-agent/SKILL.md</code>"
+        "（Windows 下即 <code>C:\\Users\\&lt;你&gt;\\.kimi-code\\skills\\aidev-agent\\</code>，"
+        "目录不存在就新建）；其它 coder agent 放入其各自的 skills 目录即可。</p></div>"
+        "<div class=\"card\"><h2>第二步：登录并开启 session</h2>"
+        "<p>账号由 operator 开通：浏览器经 <a href=\"/login\">/login</a> 登录进工作面；"
+        "CLI 侧用 login 动词写入本机令牌。</p></div>"
+        "<div class=\"card\"><h2>第三步：凭任务令牌领取任务</h2>"
+        "<p>从 operator 领到任务 sigt 后执行 <code>claim --handoff</code>——任务包自带 skill"
+        "（工作区落地 <code>.signet-skill.md</code>）与材料清单（skill / 需求正文 / 验收卡 / "
+        "hints 随包，规范材料经 <code>/api/norms/&lt;name&gt;</code> 随取），零本机先验文件。</p></div>"
+    )
+    return _page("接入指南", "未登录", "guide", body)
 
 
 def render_overview(user, snapshot):

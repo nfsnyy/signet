@@ -6,6 +6,7 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from . import distribution
 from .authn import mint_sigt
 from .collaboration import collaboration_overview, process_collaboration_sync, validate_report_collaboration
 from .domain import (
@@ -763,11 +764,30 @@ def task_inbox(repository, task_id):
     return [message for message in messages if message.get("to_task") == task_id]
 
 
+def task_materials(repository, metadata):
+    """任务包材料清单（REQ-6/AC-08）：[{name, via}]——via="package" 已含于本任务包
+    （skill/requirement→requirement_body/acceptance_card/assets/hints→workspace_files），
+    via 为绝对路径者经对应读端点匿名获取（AC-07 名册内规范材料）。"""
+    materials = [
+        {"name": "skill", "via": "package"},
+        {"name": "requirement", "via": "package"},
+        {"name": "acceptance_card", "via": "package"},
+        {"name": "assets", "via": "package"},
+    ]
+    if (Path(repository) / "hints.md").is_file():
+        materials.append({"name": "hints", "via": "package"})
+    for norm in distribution.norm_roster():
+        name = norm[:-3] if norm.endswith(".md") else norm
+        materials.append({"name": name, "via": "/api/norms/" + norm})
+    return materials
+
+
 def build_task_package(repository, metadata, body):
     """sigt 接管响应携带的完整任务包（AC-01）。
 
     workspace_files 由 CLI 原样落进工作区根：AGENTS.md 恒有；状态仓根存在
-    hints.md 时一并注入（不存在则不注入、不报错——防御语义）。
+    hints.md 时一并注入（不存在则不注入、不报错——防御语义）；T15 起增
+    .signet-skill.md（=skill.content，与 /api/skill、任务包 skill 字段三处同源）。
     """
     repository = Path(repository)
     workspace_files = {"AGENTS.md": workspace_agents(metadata)}
@@ -777,6 +797,11 @@ def build_task_package(repository, metadata, body):
             workspace_files["hints.md"] = hints_source.read_text(encoding="utf-8")
         except OSError:
             pass
+    # REQ-2/AC-02 + REQ-4/AC-04：skill 自举——恰两键 version/content，content 全文
+    # 含注入标识行；三处分发同源同字节（read_skill 唯一事实源）。
+    skill_document = distribution.read_skill()
+    skill = {"version": skill_document["version"], "content": skill_document["content"]}
+    workspace_files[".signet-skill.md"] = skill_document["content"]
     return {
         "task_id": metadata["task_id"],
         "title": metadata.get("title"),
@@ -788,6 +813,8 @@ def build_task_package(repository, metadata, body):
         "assets": spec_asset_manifest(repository, metadata),
         "inbox": task_inbox(repository, metadata["task_id"]),
         "lease_expires_at": (metadata.get("lease") or {}).get("expires_at"),
+        "skill": skill,
+        "materials": task_materials(repository, metadata),
         "workspace_files": workspace_files,
     }
 

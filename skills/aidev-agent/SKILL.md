@@ -26,7 +26,7 @@ whenToUse: 当任务位于 aidev 工作区（目录里含 task.md、AGENTS.md、
 - 所有命令输出 JSON：成功 `{"ok": true, "result": ...}`；失败 `{"ok": false, "error": {"code": ...}}`。每一步都要检查 `ok`，失败时读 `error.code` 并按规则纠正后重试，不要绕过。
 - 运行前提：Python 3.11+，只用标准库。
 
-## 1. 动词清单（agent 面）
+## 1. 动词表（agent 面）
 
 | 动词 | 作用 | 关键参数 | 前置条件 |
 |---|---|---|---|
@@ -57,7 +57,7 @@ operator 面动词（`init-repository/init-task/freeze/refreeze/sync/verify/reje
 - **重 claim（幂等续作）**：同 actor 持 sigt 重跑 claim = 接管 + 续期（`lease.renewed` 事件、`expires_at` 顺延 24h）；换 actor 必须先由 operator 释放租约，令牌不会越权接管他人租约。
 - **返场**：reject 后若工作区投影未刷新、提案 stale（`proposal.stale` / `proposal.spec_pin_mismatch`），处置 = 请 operator sync 后重 claim；不得手改 `task.md` 强推。
 
-## 2. 硬性约束（违反会被拒绝或作废）
+## 2. 工作区纪律（硬性约束，违反会被拒绝或作废）
 
 1. **不得直接修改** `task.md`、`AGENTS.md`、`contract/` 下任何文件；任务状态只能经提案 + operator sync 变更。
 2. `contract/` 是冻结规格副本，claim/submit 时平台会校验其 SHA-256 与 spec_pin 一致，篡改会报 `claim.spec_hash_mismatch`。
@@ -104,7 +104,7 @@ operator 面动词（`init-repository/init-task/freeze/refreeze/sync/verify/reje
 
 先读 `AGENTS.md` 与冻结三件套再动手；不确定能否做某事时，优先用 `block` 提出问题而不是猜。
 
-## 6. 自验环境、收尾与反哺纪律
+## 6. 收尾协议（自验环境、收尾与反哺纪律）
 
 ### 6.1 自验环境（完成定义）
 
