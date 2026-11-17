@@ -40,7 +40,7 @@ python aidev-agent.py login --user nfsnyy --password '<口令在 hints.md/口头
   → 清杂（删 spec 目录 __pycache__ 等）→ disable agent-tN 账号 → 设计稿变更历史 + §15 补记
 ```
 
-新增页面、核心用户旅程变更、复杂交互或权限状态变化时，起草三件套前先走查低成本 HTML mockup/页面流程草图，确认入口、信息、操作顺序和空/错/无权限状态；纯 API/CLI、内部重构与明确小修复不强制。mockup 是规格输入而非验收替代品，作为判定依据时须随契约资产冻结。
+新增页面、核心用户旅程变更、复杂交互或权限状态变化时，先创建独立 mock task，以低成本 HTML、假数据或模拟交互走查入口、信息、操作顺序和空/错/无权限状态。mock task 验收关闭为 Done 后，operator 才签发真实实现 sigt；真实实现不得提前 claim/开工，并须引用 mock task ID 与验收通过版本/commit。纯 API/CLI、内部重构与明确小修复不强制。mock task 只验设计放行，真实实现仍须独立行为验收；mockup 作为判定依据时须随相应契约资产冻结。
 
 ## 4. 关键命令模板
 
