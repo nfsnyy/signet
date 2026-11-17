@@ -18,7 +18,35 @@ whenToUse: 当用户要求我接管/执行 operator 职责（建任务、出派�
 ## 1. 岗位边界（做 / 不做）
 
 - **做**：需求登记与确认（状态仓 `requirements/`）、init-task、签发/重铸 sigt、出派活卡、起草裁决、组织 H1/H2 签署、freeze/refreeze、sync、verify（含人审组织）、close --ship、环境与账号维护（8000 服务、agent-tN 账号建/停）、经验合入（状态仓 hints.md、设计稿 §15）。
-- **不做**：不实现任务；不改平台功能代码（那是任务）；不替起草会话写三件套；不把任何口令/令牌传给任务之外的人；confirm/签署类动作只接受用户本人在对话中明确指示后代为执行（凭证身份=nfsnyy，事件留痕）。
+- **不做**：不实现任务；不改平台功能代码（那是任务）；不替起草会话写三件套；不把任何口令/令牌传给任务之外的人；confirm/签署类动作只接受用户本人在对话中明确指示后代为执行（凭证身份=nfsnyy，事件留痕）；**不把用户的讨论、局部确认或方向认可扩大解释为下一步流程动作的授权（授权语义见 §1.1）**。
+
+## 1.1 授权语义（用户的话 ≠ 流程授权）
+
+用户的一句"可以/同意/先做"只授权它字面对象的那个动作，operator 不得外推。**任何账本动词（init-task/签 sigt/freeze/verify/close/confirm/改冻结件）执行前必问三问**：
+
+1. 用户明确授权的具体动词是什么——讨论？登记？立项？签署？验收？
+2. 这项改变是否已有 confirmed 需求 + 冻结任务覆盖？
+3. 我现在做的是 operator 的记录与组织工作，还是越界进入了实现/起草？
+
+**授权词表（用户话 → 只意味着 → 不得外推为）**：
+
+| 用户话 | 只意味着 | 不得外推为 |
+|---|---|---|
+| 讨论/提问/调研 | 对话与记录（changelog/纪要） | 任何账本动词 |
+| "赞同/方向认可" | 设计稿记倾向（注明"方向认可≠条目确认"） | 需求 confirm、任务派生 |
+| "登记/记下来" | enhancement/backlog 容器登记 | 排期、立项 |
+| "立项/派活/办/都立项吧" | init-task + 派活卡（范围=需求已确认条目，范围分类疑问报人裁定） | 自定范围、提前签发 sigt 以外的扩权 |
+| "签" | 摘要所述对象的 freeze/refreeze H1/H2 | 对摘要内容的任何变更 |
+| "确认"（close 摘要后） | close --push --ship（ship=工作树现状） | 摘要外改动 |
+| "通过"（走查后） | 写 manual-results 继续验收 | 代用户勾选需求条目 |
+
+词表未覆盖或语义含糊时，停下来问，不要用"应该就是这个意思"补齐。
+
+**需求确认四分（互不推导）**：需求入库 / 架构方向认可 / 判据条目逐条 confirm / 排期与派生——四件独立的事。confirm 唯一通道=页面逐条打勾（会话路径，人本人操作）；operator 在任何路径（含 CLI/管理员通道）都不得代办条目确认，"赞同架构"不构成"确认全部条目"。
+
+**排期门**：init-task/签发 sigt 的前置=需求 confirmed + 用户明确的排期语句（词表内）。讨论中浮现的依赖门/想法/改进**绝不创建任务**；每次创建须能说清"排期授权来源=用户哪句话"，说不出就不创建。
+
+**实现禁令无例外**：operator 不实现是身份定义，"修复流程/补缺口/顺手改一下"均不构成例外——凡平台代码/测试/规范文档的实质改动只有一条路径：enhancement 登记 → operator 分捡 → 需求/任务流程。分支、worktree、环境搭建在技术上隔离，在流程上同属越界，**授权前一律不碰**。operator 唯一合法的代码触碰=冻结件资产修复（走 §7 对账 + 签署/veto 流程并留痕）。
 
 ## 2. 动词清单（operator 面）
 
@@ -26,10 +54,10 @@ whenToUse: 当用户要求我接管/执行 operator 职责（建任务、出派�
 |---|---|---|
 | `login` | 登录平台服务（令牌写 `~/.signet/client.json`） | `--user`、`--password` |
 | `init-repository` | 建权威状态仓账本 | `--repo`、`--actor` |
-| `init-task` | 建任务并初始化工作区（空目录、不在状态仓内） | `--repo`、`--workspace`、`--title`、`--requirement`、`--owner`、`--actor` |
-| `freeze` | 冻结三件套（Draft 或 **Implemented 未钉扎**均可——起草流程标准门） | `--task-id`、`--workspace`、`--acceptance-card`、`--contract`、`--mapping`、`--h1-actor`、`--h2-actor` |
+| `init-task` | 建任务（Draft）；工作区由客户端经任务包拉取自行落地 | `--title`、`--requirement`、`--owner`、`--actor`（`--repo` 逻辑 id 可省略；`--workspace` 纯本地落盘） |
+| `freeze` | 冻结三件套（Draft 或 **Implemented 未钉扎**均可——起草流程标准门；内容上传+随件摘要） | `--task-id`、`--acceptance-card`、`--contract`、`--mapping`、`--h1-actor`、`--h2-actor`（`--repo` 逻辑 id 可省略；`--workspace` 纯本地可选，成功后自动落投影） |
 | `refreeze` | 重冻新版本（须已钉扎；带 reason 留痕） | 同 freeze + `--reason` |
-| `sync` | 受理工作区 outbox 提案并刷新投影（只刷新有提案的工作区） | `--repo`、`--workspace`（可多个）、`--actor`、`--push` |
+| `sync` | 受理工作区 outbox 提案（内容上传：proposals+证据随件）并刷新投影（客户端拉取落盘） | `--workspace`（可多个，本地）、`--actor`、`--push`（`--repo` 逻辑 id 可省略） |
 | `verify` | 执行/录入验收（`--execute` 净室跑冻结用例 + `--manual-results` 人审结果） | `--task-id`、`--verifier`、`--confirmed-by` |
 | `reject` | 驳回任务（implement/input 分类；input 终态 Void） | `--task-id`、`--category`、`--reason` |
 | `close` | 关闭任务（accept → Done；`--ship` 一步双仓入库） | `--task-id`、`--decision`、`--actor`、`--push`、`--ship` |
@@ -52,7 +80,7 @@ python aidev-agent.py login --user nfsnyy --password '<口令，hints.md/口头�
 ```
 
 - Git Bash 环境变量路径一律 `C:/` 形态（`/c/...` 静默失效）。
-- **单机假设声明（api-remote-ready 落地前）**：`init-repository` / `init-task` / `freeze` / `refreeze` / `sync` 的 `--repo`、`--workspace` 与三件套路径均为**服务端本地路径**——这些动词仅当 CLI 与服务同机（或共享文件系统）时可用；跨机 operator 先 clone 平台仓到本机跑 CLI（ship 本就需要本机工作副本），但上述动词仍受服务端路径解析限制。根治在需求 `api-remote-ready`（REQ-1~3：逻辑标识 + 内容上传 + 客户端拉取）。
+- **远程就绪（api-remote-ready 已落地）**：`--repo` 只接受 **repo 逻辑 id**（绑定仓 project.json 的 project_id）或省略——省略一律落服务端绑定存储（SIGNET_STATE_REPO）；文件系统路径形态（盘符/POSIX 绝对/相对）一律 400 `repo.invalid_identifier`，未知逻辑 id 404 `repo.not_found`。CLI 与服务可跨机部署，不依赖共享文件系统。三件套与资产经内容上传（freeze/refreeze/veto-propose 随件携带 `card_sha256`/`contract_sha256`/`mapping_sha256` 摘要 + `[{"path","sha256"}]` 资产清单，服务端逐件校验，不符即 `c3.content_hash_mismatch`）；`--workspace` 自此纯客户端本地使用、不出网——投影由 CLI 在动词成功后经任务包读面拉取自行落盘，服务端零写 client 工作区。
 - 8000 常驻服务：`SIGNET_STATE_REPO=<状态仓> SIGNET_PLATFORM_REPO=<平台仓> python -m aidev.web.server --port 8000`（后台）。**平台仓代码变更后必须重启才生效**；服务重启不动账本。**close --ship 后必须重启 8000 簿记服务**（仪式化防版本漂移；若 ship 前后平台仓代码内容零变更——如交付面未变的返场回合——可豁免并在 close 摘要注明）。verify/freeze/refreeze 等验收类动词执行前，先探针确认被测实例代码版本不早于本轮首个平台改动（stale-service 三连事故教训，根治=债务 #42 服务版本自检）。
 - commit 身份：`-c user.name='nfsnyy' -c user.email='nfsnyy@signet.local'`；签名约定：H1/H2 双签 nfsnyy（用户对话中明确"签"后代为执行）。
 
@@ -84,10 +112,13 @@ curl -s -X POST "http://127.0.0.1:8000/api/tasks/<task_id>/claims" \
 python -c "from aidev.gitrepo import ensure_repository; from aidev.authn import mint_sigt; \
 print(mint_sigt('<task_id>','nfsnyy',str(ensure_repository('<状态仓>'))))"
 
-# freeze（CWD 必须在 contract/ 上级——相对路径按 CWD 解析）
-python aidev-operator.py freeze --repo <状态仓> --task-id <id> --workspace <工作区> \
-  --acceptance-card contract/acceptance-card.json --contract contract/contract.json \
-  --mapping contract/mapping.json --h1-actor nfsnyy --h2-actor nfsnyy
+# freeze（内容上传：CLI 本地读三件套并自动附 card_sha256/contract_sha256/mapping_sha256
+# 随件摘要 + [{"path","sha256"}] 资产清单；--repo 可省略=服务端绑定存储，逻辑 id 亦可；
+# 成功后投影自动经任务包拉取落盘 --workspace 本地目录）
+python aidev-operator.py freeze --task-id <id> \
+  --acceptance-card <本地路径>/acceptance-card.json --contract <本地路径>/contract.json \
+  --mapping <本地路径>/mapping.json --h1-actor nfsnyy --h2-actor nfsnyy \
+  [--repo <逻辑 id>] [--workspace <本地目录>]
 
 # 接口类任务冻结（T12 起）：contract 必须携带非空 interfaces 段，缺省/null → c2.interfaces_missing 拒冻
 # 判型信号 = task.md frontmatter interface_class（建任务/派生时按「新增/变更端点、表单、事件负载」标注，缺省 false）
@@ -95,16 +126,16 @@ python aidev-operator.py freeze --repo <状态仓> --task-id <id> --workspace <�
 #           forms 字段三键 name/type/required；events payload schema 子集 type/required/properties/items/const）
 # 与完整示例见 doc/三件套编写规范.md §2.1（示例 = T12 冻结契约 spec-fb64d0cb 的 interfaces 段）。
 
-# verify / close
-python aidev-operator.py verify --repo <状态仓> --task-id <id> --execute \
+# verify / close（--repo 同上：省略=绑定存储，逻辑 id=绑定仓 project_id）
+python aidev-operator.py verify --task-id <id> --execute \
   --manual-results <人审json> --verifier operator --confirmed-by nfsnyy
-python aidev-operator.py close --repo <状态仓> --task-id <id> --decision accept \
+python aidev-operator.py close --task-id <id> --decision accept \
   --actor nfsnyy --reason '...' --push --ship   # ship 需 SIGNET_PLATFORM_REPO
 ```
 
 ## 6. 派活卡模板（两段式）
 
-卡 = **角色**（任务 id、spec 状态、执行者标签、skill 指针、实现卡加粗"必须新开 session"）→ **入场**（`login` / `claim --handoff <sigt> --workspace <路径> --on-behalf-of <标签>` 命令、sigt 代码块、"单行勿折行/验签失败找 operator 重发勿自行拼接"）→ **输入材料**（需求正文路径、原型页、格式范本 spec 路径、被测代码文件清单）→ **范围+纪律**（以冻结三件套/任务标题为准绳；不 freeze、不宣布完成、不 push；歧义列裁决项等 operator；五段式报告 + evidence）→ **收尾协议**（submit 后汇报"等 operator"，不宣布完成）。
+卡 = **角色**（任务 id、spec 状态、执行者标签、skill 指针、实现卡加粗"必须新开 session"）→ **入场**（`login` / `claim --handoff <sigt> --workspace <路径> --on-behalf-of <标签>` 命令、sigt 代码块、"单行勿折行/验签失败找 operator 重发勿自行拼接"）→ **输入材料**（需求正文路径、原型页、格式范本 spec 路径、被测代码文件清单）→ **范围+纪律**（以冻结三件套/任务标题为准绳；不 freeze、不宣布完成、不 push；歧义列裁决项等 operator；五段式报告 + evidence）→ **收尾协议**（submit 后汇报"等 operator"，不宣布完成）。operator 侧动词参数示例一律用逻辑 id 或省略（路径形态 repo 已被服务端拒绝，400 repo.invalid_identifier）。
 
 - 起草卡：产出三件套 + 用例；新特性用例"红即规格目标"，回归类当场绿；py_compile 全过。
 - 实现卡：照冻结三件套实现；用例全绿才算完；全量回归基线只增不减。
