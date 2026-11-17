@@ -313,7 +313,9 @@ def contract_assets(contract_path):
     """Collect the asset files a contract references (dependency_files + case fixtures).
 
     Paths are resolved relative to the contract file's directory, mirroring the
-    server-side contract validation layout.
+    server-side contract validation layout. Returns (manifest, files)——manifest 为
+    api-remote-ready 目标形态 [{"path","sha256"}] 对象清单（随 freeze/veto 请求
+    经 asset_manifest 字段上传，服务端逐件校验 sha256）。
     """
     try:
         contract = json.loads(Path(contract_path).read_text(encoding="utf-8"))
@@ -337,6 +339,7 @@ def contract_assets(contract_path):
     relative_paths = list(dict.fromkeys(referenced))
     base = Path(contract_path).resolve().parent
     files = []
+    manifest = []
     for relative in relative_paths:
         relative_path = Path(relative)
         if relative_path.is_absolute() or ".." in relative_path.parts:
@@ -344,8 +347,10 @@ def contract_assets(contract_path):
         full_path = base / relative_path
         if not full_path.is_file():
             raise ClientInputError("c3.missing_fixture", f"fixture does not exist: {relative}")
-        files.append(("assets", relative, full_path.read_bytes()))
-    return relative_paths, files
+        content = full_path.read_bytes()
+        manifest.append({"path": relative, "sha256": hashlib.sha256(content).hexdigest()})
+        files.append(("assets", relative, content))
+    return manifest, files
 
 
 def build_request(role, arguments, sigt_payload=None):
@@ -424,10 +429,15 @@ def build_request(role, arguments, sigt_payload=None):
         fields = present({"repo": arguments.repo, "actor": arguments.actor, "name": arguments.name, "owner": arguments.owner})
         return "POST", "/api/repositories", fields, None
     if command == "init-task":
-        fields = present({"repo": arguments.repo, "workspace": arguments.workspace, "title": arguments.title, "requirement": arguments.requirement, "owner": arguments.owner, "actor": arguments.actor})
+        # api-remote-ready（REQ-3/AC-09）：--workspace 纯客户端本地使用、不出网——
+        # 服务端建任务后由 CLI 经任务包拉取自行落地投影。
+        fields = present({"repo": arguments.repo, "title": arguments.title, "requirement": arguments.requirement, "owner": arguments.owner, "actor": arguments.actor})
         return "POST", "/api/tasks", fields, None
     if command in ("freeze", "refreeze"):
-        relative_paths, asset_files = contract_assets(arguments.contract)
+        manifest, asset_files = contract_assets(arguments.contract)
+        card_name, card_b = read_upload(arguments.acceptance_card, "c1.invalid_card")
+        contract_name, contract_b = read_upload(arguments.contract, "c2.invalid_contract")
+        mapping_name, mapping_b = read_upload(arguments.mapping, "c1.invalid_mapping")
         fields = present({
             "repo": arguments.repo,
             "workspace": arguments.workspace,
@@ -435,12 +445,16 @@ def build_request(role, arguments, sigt_payload=None):
             "h2_actor": arguments.h2_actor,
             "reason": getattr(arguments, "reason", None),
             "push": str(arguments.push).lower(),
-            "asset_manifest": json.dumps(relative_paths, ensure_ascii=False),
+            # AC-05：三件套随件摘要（服务端校验不符即 c3.content_hash_mismatch）。
+            "card_sha256": hashlib.sha256(card_b).hexdigest(),
+            "contract_sha256": hashlib.sha256(contract_b).hexdigest(),
+            "mapping_sha256": hashlib.sha256(mapping_b).hexdigest(),
+            "asset_manifest": json.dumps(manifest, ensure_ascii=False),
         })
         files = [
-            ("card", *read_upload(arguments.acceptance_card, "c1.invalid_card")),
-            ("contract", *read_upload(arguments.contract, "c2.invalid_contract")),
-            ("mapping", *read_upload(arguments.mapping, "c1.invalid_mapping")),
+            ("card", card_name, card_b),
+            ("contract", contract_name, contract_b),
+            ("mapping", mapping_name, mapping_b),
         ]
         files.extend(asset_files)
         if arguments.operation_source:
@@ -448,7 +462,34 @@ def build_request(role, arguments, sigt_payload=None):
         endpoint = "freeze" if command == "freeze" else "refreeze"
         return "POST", f"/api/tasks/{arguments.task_id}/{endpoint}", fields, files
     if command == "sync":
-        fields = present({"repo": arguments.repo, "workspace": list(arguments.workspace), "actor": arguments.actor, "push": str(arguments.push).lower()})
+        # AC-08：sync 改内容上传——读本地各工作区 outbox 组装 proposals，submit 类
+        # 提案的证据字节随 multipart 上传（服务端按文件名匹配，不按 client 路径读）。
+        proposals = []
+        evidence_uploads = []
+        workspace_paths = list(arguments.workspace or [])
+        for workspace in workspace_paths:
+            outbox = Path(workspace) / "outbox"
+            if not outbox.is_dir():
+                continue
+            for path in sorted(outbox.glob("*.json")):
+                try:
+                    proposal = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(proposal, dict):
+                    continue
+                proposals.append(proposal)
+                for item in (proposal.get("parameters") or {}).get("evidence") or []:
+                    source = Path(str(item.get("path") or ""))
+                    if source.is_file():
+                        evidence_uploads.append(("evidence", source.name, source.read_bytes()))
+        fields = present({"repo": arguments.repo, "actor": arguments.actor, "push": str(arguments.push).lower()})
+        if evidence_uploads:
+            fields["proposals"] = json.dumps(proposals, ensure_ascii=False)
+            fields["workspace"] = json.dumps(workspace_paths, ensure_ascii=False)
+            return "POST", "/api/sync", fields, evidence_uploads
+        fields["proposals"] = proposals
+        fields["workspace"] = workspace_paths
         return "POST", "/api/sync", fields, None
     if command == "verify":
         fields = present({
@@ -488,7 +529,15 @@ def build_request(role, arguments, sigt_payload=None):
         fields = present({"repo": arguments.repo, "category": arguments.category, "reason": arguments.reason, "actor": arguments.actor, "workspace": arguments.workspace, "push": str(arguments.push).lower()})
         return "POST", f"/api/tasks/{arguments.task_id}/adjudication", fields, None
     if command == "veto":
-        relative_paths, asset_files = contract_assets(arguments.contract) if arguments.contract else ([], [])
+        manifest, asset_files = contract_assets(arguments.contract) if arguments.contract else ([], [])
+        files = []
+        digests = {}
+        for field in ("card", "contract", "mapping"):
+            path = getattr(arguments, {"card": "acceptance_card"}.get(field, field))
+            if path:
+                name, content = read_upload(path, "veto.file_missing")
+                files.append((field, name, content))
+                digests[f"{field}_sha256"] = hashlib.sha256(content).hexdigest()
         fields = present({
             "repo": arguments.repo,
             "actor": arguments.actor,
@@ -501,13 +550,9 @@ def build_request(role, arguments, sigt_payload=None):
             "withdraw": str(arguments.withdraw).lower(),
             "list_flag": str(arguments.list).lower(),
             "push": str(arguments.push).lower(),
-            "asset_manifest": json.dumps(relative_paths, ensure_ascii=False),
+            "asset_manifest": json.dumps(manifest, ensure_ascii=False),
         })
-        files = []
-        for field in ("card", "contract", "mapping"):
-            path = getattr(arguments, {"card": "acceptance_card"}.get(field, field))
-            if path:
-                files.append((field, *read_upload(path, "veto.file_missing")))
+        fields.update(digests)
         files.extend(asset_files)
         return "POST", "/api/vetoes", fields, files
     if command == "inbox":
@@ -609,8 +654,23 @@ def _safe_workspace_file(workspace, name):
     return Path(workspace) / relative
 
 
-def land_handoff_workspace(workspace, token, package):
-    """把 claim --handoff 任务包落地工作区（task.md、工作区附带文件、contract/ 资产、.signet-token）。"""
+def pull_package(base_url, task_id, token=None, sigt=None, repo=None):
+    """REQ-3/AC-09：投影客户端拉取——经任务包读面取回完整投影。repo 为 CLI
+    --repo 透传（逻辑 id/本地路径），省略时落服务端绑定存储。"""
+    path = f"/api/tasks/{task_id}/package"
+    if repo:
+        path += "?" + urllib.parse.urlencode({"repo": repo})
+    try:
+        status, payload = perform("GET", base_url + path, token=token, sigt=sigt)
+    except ServiceUnavailable as error:
+        raise ClientInputError("service.unreachable", f"拉取任务包时无法连接服务: {error.base_url}", exit_code=3) from error
+    if status != 200 or not (isinstance(payload, dict) and payload.get("ok")):
+        raise ClientInputError("package.pull_failed", f"任务包拉取失败（HTTP {status}）: {task_id}", exit_code=4)
+    return payload["result"]
+
+
+def _land_package_files(workspace, package, token=None, sigt=None, repo=None):
+    """把任务包落盘工作区：task.md、工作区附带文件、contract/ 资产（逐项 sha256 校验）。"""
     workspace = Path(workspace)
     if workspace.exists() and not workspace.is_dir():
         raise ClientInputError("workspace.not_directory", f"工作区路径不是目录: {workspace}")
@@ -634,11 +694,15 @@ def land_handoff_workspace(workspace, token, package):
         expected = asset.get("sha256")
         if not name or not expected:
             raise ClientInputError("package.invalid", "任务包资产清单条目缺少 name/sha256")
+        asset_path = f"/api/tasks/{task_id}/assets/{urllib.parse.quote(name)}"
+        if repo:
+            asset_path += "?" + urllib.parse.urlencode({"repo": repo})
         try:
             status, content = perform(
                 "GET",
-                f"{base_url}/api/tasks/{task_id}/assets/{urllib.parse.quote(name)}",
-                sigt=token,
+                base_url + asset_path,
+                token=token,
+                sigt=sigt,
                 raw=True,
             )
         except ServiceUnavailable as error:
@@ -650,8 +714,22 @@ def land_handoff_workspace(workspace, token, package):
         target = _safe_workspace_file(workspace / "contract", name)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
-    token_path = workspace / WORKSPACE_TOKEN_FILE
+    return task_id
+
+
+def land_projection(workspace, package, token=None, repo=None):
+    """REQ-3/AC-09：operator 侧投影落地——freeze/refreeze/sync/init-task/reject/adjudicate
+    成功后，CLI 自行拉取任务包并把 task.md/contract/ 三件套落盘本地 --workspace
+    （该参数自此纯客户端本地使用，不出网）。"""
+    return _land_package_files(workspace, package, token=token, repo=repo)
+
+
+def land_handoff_workspace(workspace, token, package):
+    """把 claim --handoff 任务包落地工作区（task.md、工作区附带文件、contract/ 资产、.signet-token）。"""
+    task_id = _land_package_files(workspace, package, sigt=token)
+    token_path = Path(workspace) / WORKSPACE_TOKEN_FILE
     token_path.write_text(token + "\n", encoding="utf-8", newline="\n")
+    return task_id
 
 
 def handoff_claim(arguments):
@@ -690,21 +768,21 @@ def parser_for(role):
         login.add_argument("--user", required=True)
         login.add_argument("--password", required=True)
         repository = subparsers.add_parser("init-repository")
-        repository.add_argument("--repo", required=True)
+        repository.add_argument("--repo")
         repository.add_argument("--actor", required=True)
         repository.add_argument("--name")
         repository.add_argument("--owner")
         task = subparsers.add_parser("init-task")
-        task.add_argument("--repo", required=True)
+        task.add_argument("--repo")
         task.add_argument("--workspace", required=True)
         task.add_argument("--title", required=True)
         task.add_argument("--requirement", required=True)
         task.add_argument("--owner", required=True)
         task.add_argument("--actor", required=True)
         freeze = subparsers.add_parser("freeze")
-        freeze.add_argument("--repo", required=True)
+        freeze.add_argument("--repo")
         freeze.add_argument("--task-id", required=True)
-        freeze.add_argument("--workspace", required=True)
+        freeze.add_argument("--workspace")
         freeze.add_argument("--acceptance-card", required=True)
         freeze.add_argument("--contract", required=True)
         freeze.add_argument("--mapping", required=True)
@@ -713,9 +791,9 @@ def parser_for(role):
         freeze.add_argument("--h2-actor", required=True)
         freeze.add_argument("--push", action="store_true")
         refreeze = subparsers.add_parser("refreeze")
-        refreeze.add_argument("--repo", required=True)
+        refreeze.add_argument("--repo")
         refreeze.add_argument("--task-id", required=True)
-        refreeze.add_argument("--workspace", required=True)
+        refreeze.add_argument("--workspace")
         refreeze.add_argument("--acceptance-card", required=True)
         refreeze.add_argument("--contract", required=True)
         refreeze.add_argument("--mapping", required=True)
@@ -725,7 +803,7 @@ def parser_for(role):
         refreeze.add_argument("--reason", required=True)
         refreeze.add_argument("--push", action="store_true")
         verify = subparsers.add_parser("verify")
-        verify.add_argument("--repo", required=True)
+        verify.add_argument("--repo")
         verify.add_argument("--task-id", required=True)
         verify.add_argument("--results")
         verify.add_argument("--execute", action="store_true")
@@ -735,7 +813,7 @@ def parser_for(role):
         verify.add_argument("--confirmed-by", required=True)
         verify.add_argument("--push", action="store_true")
         reject = subparsers.add_parser("reject")
-        reject.add_argument("--repo", required=True)
+        reject.add_argument("--repo")
         reject.add_argument("--task-id", required=True)
         reject.add_argument("--category", choices=["implementation", "input"], required=True)
         reject.add_argument("--reason", required=True)
@@ -743,7 +821,7 @@ def parser_for(role):
         reject.add_argument("--workspace")
         reject.add_argument("--push", action="store_true")
         close = subparsers.add_parser("close")
-        close.add_argument("--repo", required=True)
+        close.add_argument("--repo")
         close.add_argument("--task-id", required=True)
         close.add_argument("--decision", choices=["accept", "reject"], required=True)
         close.add_argument("--actor", required=True)
@@ -751,16 +829,16 @@ def parser_for(role):
         close.add_argument("--push", action="store_true")
         close.add_argument("--ship", action="store_true", help="close 后顺带执行本机 ship（git add/commit/push 由 CLI 在 SIGNET_PLATFORM_REPO 工作副本执行）")
         ship_parser = subparsers.add_parser("ship")
-        ship_parser.add_argument("--repo", required=True)
+        ship_parser.add_argument("--repo")
         ship_parser.add_argument("--task-id", required=True)
         void = subparsers.add_parser("void")
-        void.add_argument("--repo", required=True)
+        void.add_argument("--repo")
         void.add_argument("--task-id", required=True)
         void.add_argument("--reason", choices=["definition-defect", "cancel", "specification-invalidated"], required=True)
         void.add_argument("--actor", required=True)
         void.add_argument("--push", action="store_true")
         adjudicate = subparsers.add_parser("adjudicate")
-        adjudicate.add_argument("--repo", required=True)
+        adjudicate.add_argument("--repo")
         adjudicate.add_argument("--task-id", required=True)
         adjudicate.add_argument("--category", choices=["implementation", "definition"], required=True)
         adjudicate.add_argument("--reason", required=True)
@@ -768,12 +846,12 @@ def parser_for(role):
         adjudicate.add_argument("--workspace")
         adjudicate.add_argument("--push", action="store_true")
         sync = subparsers.add_parser("sync")
-        sync.add_argument("--repo", required=True)
+        sync.add_argument("--repo")
         sync.add_argument("--workspace", action="append", required=True)
         sync.add_argument("--actor", required=True)
         sync.add_argument("--push", action="store_true")
         veto = subparsers.add_parser("veto")
-        veto.add_argument("--repo", required=True)
+        veto.add_argument("--repo")
         veto.add_argument("--actor", required=True)
         veto.add_argument("--task-id")
         veto.add_argument("--veto-id")
@@ -788,7 +866,7 @@ def parser_for(role):
         veto.add_argument("--list", action="store_true")
         veto.add_argument("--push", action="store_true")
         inbox = subparsers.add_parser("inbox")
-        inbox.add_argument("--repo", required=True)
+        inbox.add_argument("--repo")
         inbox.add_argument("--task-id")
     else:
         agent_login = subparsers.add_parser("login")
@@ -842,6 +920,54 @@ def parser_for(role):
     log_parser.add_argument("--repo", required=True)
     log_parser.add_argument("--task-id", required=True)
     return parser
+
+
+def land_after_success(role, arguments, payload, base_url, token):
+    """REQ-3/AC-09：operator 侧动词成功后自行拉取任务包并落地投影——服务端已删除
+    全部 client 工作区写面；--workspace 自此纯客户端本地使用。返回退出码或 None。"""
+    command = arguments.command
+    repo = getattr(arguments, "repo", None)
+
+    def pull(task_id):
+        return pull_package(base_url, task_id, token=token, repo=repo)
+
+    try:
+        if command == "init-task":
+            workspace = getattr(arguments, "workspace", None)
+            task_id = (payload.get("result") or {}).get("task_id")
+            if not workspace or not task_id:
+                return None
+            target = Path(workspace)
+            if target.exists() and any(target.iterdir()):
+                raise ClientInputError("workspace.not_empty", "agent workspace must be empty")
+            land_projection(target, pull(task_id), token=token, repo=repo)
+            return None
+        if command in ("freeze", "refreeze", "reject", "adjudicate"):
+            workspace = getattr(arguments, "workspace", None)
+            task_id = getattr(arguments, "task_id", None)
+            if not workspace or not task_id:
+                return None
+            land_projection(Path(workspace), pull(task_id), token=token, repo=repo)
+            return None
+        if command == "sync":
+            for workspace in list(getattr(arguments, "workspace", None) or []):
+                tasks = []
+                outbox = Path(workspace) / "outbox"
+                if outbox.is_dir():
+                    for path in sorted(outbox.glob("*.json")):
+                        try:
+                            proposal = json.loads(path.read_text(encoding="utf-8"))
+                        except (OSError, ValueError):
+                            continue
+                        task_id = proposal.get("task_id") if isinstance(proposal, dict) else None
+                        if task_id and task_id not in tasks:
+                            tasks.append(task_id)
+                for task_id in tasks:
+                    land_projection(Path(workspace), pull(task_id), token=token, repo=repo)
+            return None
+    except ClientInputError as error:
+        return emit_error(error.code, error.message, error.details, error.exit_code)
+    return None
 
 
 def emit_error(code, message, details, exit_code):
@@ -902,6 +1028,9 @@ def dispatch_request(role, arguments, sigt, sigt_payload):
         print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
         return 0
     if isinstance(payload, dict) and payload.get("ok") is True and "result" in payload:
+        landing = land_after_success(role, arguments, payload, base_url, token)
+        if landing is not None:
+            return landing
         print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
         return 0
     if isinstance(payload, dict) and payload.get("ok") is False and isinstance(payload.get("error"), dict):

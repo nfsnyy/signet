@@ -1,6 +1,8 @@
+import hashlib
 import html
 import json
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -10,12 +12,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, model_validator
+from starlette.concurrency import run_in_threadpool
 
 from .. import authn, distribution, readmodel
 from ..collaboration import collab_answer, collab_send, collaboration_overview
 from ..domain import lease_is_active, task_path, validate_actor_alias
 from ..errors import AuthorizationError, NotFoundError, PlatformError
-from ..jsonio import new_id
 from ..lifecycle import adjudicate_task, close_task, reject_task, ship_task, verify_task, void_task
 from ..service import (
     block,
@@ -33,6 +35,7 @@ from ..service import (
     init_task,
     merge_backlog_item,
     normalize_req_items,
+    project_metadata,
     record_pat_event,
     resolve_spec_asset,
     resolve_task_evidence,
@@ -40,7 +43,7 @@ from ..service import (
     submit,
     submit_authoritative,
     submit_requirement,
-    synchronize,
+    synchronize_uploaded,
     task_log,
     unique_evidence_name,
     update_requirement,
@@ -216,13 +219,6 @@ class InitTaskBody(ActorValidatingModel):
     req_items: list | None = None
 
 
-class SyncBody(ActorValidatingModel):
-    workspace: list
-    actor: str | None = None
-    repo: str | None = None
-    push: bool = False
-
-
 class RejectBody(ActorValidatingModel):
     category: str
     reason: str
@@ -304,25 +300,87 @@ def save_upload(upload, directory, fallback_name):
     return str(target)
 
 
-def materialize_assets(uploads, manifest, temporary):
+def parse_asset_manifest(manifest):
+    """AC-05（api-remote-ready）：asset_manifest 目标形态——[{"path","sha256"}]
+    对象列表；旧纯字符串列表或条目缺键一律 c3.invalid_fixture；路径越界
+    c3.invalid_asset_path。返回 [(path, sha256), ...]。"""
     try:
-        relative_paths = json.loads(manifest or "[]")
+        entries = json.loads(manifest or "[]")
     except json.JSONDecodeError:
         raise PlatformError("c3.invalid_fixture", "asset manifest is not valid JSON")
-    if not isinstance(relative_paths, list):
+    if not isinstance(entries, list):
         raise PlatformError("c3.invalid_fixture", "asset manifest must be a list")
-    uploads = uploads or []
-    if len(uploads) != len(relative_paths):
-        raise PlatformError("c3.invalid_fixture", "uploaded assets do not match the contract asset manifest")
-    for relative, upload in zip(relative_paths, uploads):
-        if not isinstance(relative, str) or not relative.strip():
-            raise PlatformError("c3.invalid_fixture", "asset path must be a non-empty relative string")
+    parsed = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise PlatformError("c3.invalid_fixture", "each asset manifest entry must be an object with path and sha256")
+        relative = entry.get("path")
+        digest = entry.get("sha256")
+        if not isinstance(relative, str) or not relative.strip() or not isinstance(digest, str) or len(digest) != 64:
+            raise PlatformError("c3.invalid_fixture", "each asset manifest entry must declare path and a 64-hex sha256")
         relative_path = Path(relative)
         if relative_path.is_absolute() or ".." in relative_path.parts:
             raise PlatformError("c3.invalid_asset_path", f"asset escapes the spec directory: {relative}")
-        target = Path(temporary) / relative_path
+        parsed.append((relative_path.as_posix(), digest))
+    return parsed
+
+
+def _contract_asset_declarations(contract_path):
+    """宽容解析上传的 contract.json 取 assets 声明；解析失败返回 None——
+    契约合法性由 freeze_task 的 c2.invalid_contract 统一裁决。"""
+    try:
+        document = json.loads(Path(contract_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    assets = document.get("assets")
+    return assets if isinstance(assets, dict) else {}
+
+
+def materialize_assets(uploads, manifest, temporary, contract_path=None):
+    """AC-04/AC-05：资产内容上传——逐件校验 sha256：manifest 摘要 vs 上传字节、
+    contract 声明 vs 上传字节，任一不符 → c3.content_hash_mismatch 整次拒绝；
+    通过后写入请求级临时目录。"""
+    entries = parse_asset_manifest(manifest)
+    declared = _contract_asset_declarations(contract_path) if contract_path else {}
+    uploads = uploads or []
+    if len(uploads) != len(entries):
+        raise PlatformError("c3.invalid_fixture", "uploaded assets do not match the contract asset manifest")
+    for (relative, digest), upload in zip(entries, uploads):
+        content = upload.file.read()
+        actual = hashlib.sha256(content).hexdigest()
+        if actual != digest:
+            raise PlatformError("c3.content_hash_mismatch", f"asset content hash mismatch: {relative}")
+        declared_digest = declared.get(relative)
+        if declared_digest is not None and declared_digest != actual:
+            raise PlatformError(
+                "c3.content_hash_mismatch",
+                f"declared asset hash does not match the uploaded content: {relative}",
+            )
+        target = Path(temporary) / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(upload.file.read())
+        target.write_bytes(content)
+
+
+def verify_upload_digests(card_path, contract_path, mapping_path, card_sha256, contract_sha256, mapping_sha256):
+    """AC-05：三件套随件摘要校验——任一摘要值与上传字节不符 →
+    c3.content_hash_mismatch 整次拒绝（零副作用：不写规格目录/不落事件）。"""
+    expected = {
+        "card_sha256": (card_path, card_sha256),
+        "contract_sha256": (contract_path, contract_sha256),
+        "mapping_sha256": (mapping_path, mapping_sha256),
+    }
+    for field, (path, digest) in expected.items():
+        if not digest or not path:
+            raise PlatformError("request.invalid", f"{field} is required with the uploaded specification files")
+        actual = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        if actual != digest:
+            raise PlatformError(
+                "c3.content_hash_mismatch",
+                f"{field} does not match the uploaded content",
+                details={"field": field, "expected": digest, "actual": actual},
+            )
 
 
 def authenticate_header(authorization):
@@ -425,26 +483,50 @@ def create_app(default_repo=None):
     app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")),
               name="static")
 
-    def usable_repository(candidate):
-        try:
-            return bool(candidate) and (Path(candidate).resolve() / ".git").exists()
-        except OSError:
+    PATH_FORM_REPO = re.compile(r"^[A-Za-z]:")
+    SEPARATOR_REPO = re.compile(r"[/\\]")
+
+    def is_path_form_repo(value):
+        """AC-01：repo 路径形态判定——盘符（C:\\...）、POSIX 绝对（/...）、
+        相对（a/b、..\\..）、点/父引用四类；纯逻辑 id（如 project-xxxx）不算。"""
+        if not value:
             return False
+        if PATH_FORM_REPO.match(value):
+            return True
+        if value.startswith(("/", "\\")) or value in (".", ".."):
+            return True
+        return bool(SEPARATOR_REPO.search(value))
 
     def resolve_repo(request_repo):
-        # 次序：请求显式 repo（须为真实 git 仓，须被尊重）→ SIGNET_STATE_REPO → 报错。
-        # 请求 repo 存在但不是可用仓时（如 --repo unused 探测）落到绑定仓；
-        # 未绑定时则原样透传，由 ensure_repository 给出权威错误。
-        if usable_repository(request_repo):
-            return request_repo
+        """AC-02 解析次序（绑定服务）：① 省略 → 服务端绑定存储；② 路径形态 → 400
+        repo.invalid_identifier（零副作用）；③ 逻辑 id 未命中绑定仓 project_id → 404
+        repo.not_found（零副作用）；④ 命中 → 绑定存储。
+        未绑定服务（单机开发/基线测试）维持现行本地仓直用语义：请求 repo 原样
+        采用，由 ensure_repository 给出权威错误；省略仍落 git.not_repository。"""
+        request_repo = (request_repo or "").strip() or None
         if configured_repo:
-            return configured_repo
-        if request_repo:
-            return request_repo
-        raise PlatformError(
-            "git.not_repository",
-            "未指定状态仓库：请在请求中提供 repo，或服务端以 SIGNET_STATE_REPO 启动",
-        )
+            if not request_repo:
+                return configured_repo
+            if is_path_form_repo(request_repo):
+                raise PlatformError(
+                    "repo.invalid_identifier",
+                    "repo 仅接受逻辑 project_id 或省略（落服务端绑定存储），文件系统路径形态一律拒绝",
+                    details={"repo": request_repo},
+                )
+            bound_project_id = project_metadata(configured_repo)
+            if bound_project_id and request_repo == bound_project_id:
+                return configured_repo
+            raise NotFoundError(
+                "repo.not_found",
+                f"unknown repository project_id: {request_repo}",
+                details={"repo": request_repo, "bound_project_id": bound_project_id},
+            )
+        if not request_repo:
+            raise PlatformError(
+                "git.not_repository",
+                "未指定状态仓库：请在请求中提供 repo，或服务端以 SIGNET_STATE_REPO 启动",
+            )
+        return request_repo
 
     def operator_repo(request_repo):
         repository = resolve_repo(request_repo)
@@ -818,9 +900,9 @@ def create_app(default_repo=None):
         # T9 派生闸门（AC-05）+ T10 条目引用校验（AC-01）：页面表单与 cookie API
         # 同一条校验路径——需求须存在且 confirmed，承载条目编号须命中「判据条目」节。
         validate_requirement_derive(resolve_repo(None), requirement)
-        # 与 POST /api/tasks 同一条创建路径：owner 锁定为登录用户，workspace 平台生成。
-        workspace = str(Path(tempfile.gettempdir()) / new_id("signet-ws"))
-        result = init_task(resolve_repo(None), workspace, title, requirement, session["user"], session["user"],
+        # 与 POST /api/tasks 同一条创建路径：owner 锁定为登录用户；workspace 由
+        # 客户端在任务创建后自行落地（api-remote-ready，REQ-3）。
+        result = init_task(resolve_repo(None), None, title, requirement, session["user"], session["user"],
                            req_items=req_items)
         return RedirectResponse(url="/tasks/{}".format(result["task_id"]), status_code=303)
 
@@ -885,10 +967,12 @@ def create_app(default_repo=None):
         return ok({"task": metadata, "inbox": [], "outbox_collab": [], "authoritative": True, "task_id": task_id})
 
     @app.get("/api/tasks/{task_id}/package")
-    def task_package_endpoint(request: Request, task_id: str):
+    def task_package_endpoint(request: Request, task_id: str, repo: str | None = None):
         # T15/REQ-2/AC-02：只读幂等任务包读面（claims POST 不入 interfaces 声明，
         # 为 conformance 提供探针安全的 GET 通路；匿名 401，三凭据族 200）。
-        repository = resolve_repo(None)
+        # api-remote-ready：repo 仅接受逻辑 id 或省略（AC-01/02 同口径）——
+        # CLI 投影拉取携带 --repo 时经查询参数透传，未绑定服务维持本地仓语义。
+        repository = resolve_repo(repo)
         load_authoritative_task(repository, task_id)
         metadata, body = read_task(task_path(repository, task_id))
         return ok(build_task_package(repository, metadata, body))
@@ -920,8 +1004,10 @@ def create_app(default_repo=None):
         return ok(claim_authoritative(resolve_repo(None), task_id, request_actor(request)))
 
     @app.get("/api/tasks/{task_id}/assets/{name:path}")
-    def task_asset_endpoint(request: Request, task_id: str, name: str):
-        repository = resolve_repo(None)
+    def task_asset_endpoint(request: Request, task_id: str, name: str, repo: str | None = None):
+        # api-remote-ready：repo 查询参数可选（AC-01/02 同口径），CLI 投影落地
+        # 携带 --repo 时透传；省略落服务端绑定存储。
+        repository = resolve_repo(repo)
         metadata = load_authoritative_task(repository, task_id)
         asset_path = resolve_spec_asset(repository, metadata, name)
         return Response(content=asset_path.read_bytes(), media_type="application/octet-stream")
@@ -1086,10 +1172,10 @@ def create_app(default_repo=None):
             validate_requirement_derive(resolve_repo(None), requirement)
         # 身份锁定（T2 AC-09 语义）：owner 与事件归因均以凭据身份为准，请求体所填 owner 被会话覆盖。
         actor = request_actor(request)
-        # 页面建任务：workspace 由服务端生成标识；显式传入（CLI/编排）时原样使用。
-        workspace = (body.workspace or "").strip() or str(Path(tempfile.gettempdir()) / new_id("signet-ws"))
+        # api-remote-ready（REQ-3/AC-07）：workspace 参数语义移除——服务端不创建/写
+        # client 工作区；客户端在 init-task 成功后经任务包拉取自行落地投影。
         return ok(init_task(
-            resolve_repo(body.repo), workspace, title, requirement, actor, actor,
+            resolve_repo(body.repo), None, title, requirement, actor, actor,
             req_items=body.req_items, validate_req_items=session_path))
 
     @app.post("/api/tasks/{task_id}/freeze")
@@ -1104,6 +1190,9 @@ def create_app(default_repo=None):
         contract: UploadFile = File(...),
         mapping: UploadFile = File(...),
         repo: str | None = Form(None),
+        card_sha256: str = Form(...),
+        contract_sha256: str = Form(...),
+        mapping_sha256: str = Form(...),
         operation_source: UploadFile | None = File(None),
         push: bool = Form(False),
         asset_manifest: str = Form("[]"),
@@ -1119,7 +1208,9 @@ def create_app(default_repo=None):
             contract_path = save_upload(contract, temporary, "contract.json")
             mapping_path = save_upload(mapping, temporary, "mapping.json")
             operation_source_path = save_upload(operation_source, temporary, "operations.json")
-            materialize_assets(assets, asset_manifest, temporary)
+            # AC-05：三件套随件摘要校验（不符 → c3.content_hash_mismatch 零副作用）。
+            verify_upload_digests(card_path, contract_path, mapping_path, card_sha256, contract_sha256, mapping_sha256)
+            materialize_assets(assets, asset_manifest, temporary, contract_path)
             return ok(freeze_task(repository, task_id, workspace, card_path, contract_path, mapping_path, operation_source_path, h1_actor, h2_actor, push))
 
     @app.post("/api/tasks/{task_id}/refreeze")
@@ -1135,6 +1226,9 @@ def create_app(default_repo=None):
         contract: UploadFile = File(...),
         mapping: UploadFile = File(...),
         repo: str | None = Form(None),
+        card_sha256: str = Form(...),
+        contract_sha256: str = Form(...),
+        mapping_sha256: str = Form(...),
         operation_source: UploadFile | None = File(None),
         push: bool = Form(False),
         asset_manifest: str = Form("[]"),
@@ -1150,34 +1244,141 @@ def create_app(default_repo=None):
             contract_path = save_upload(contract, temporary, "contract.json")
             mapping_path = save_upload(mapping, temporary, "mapping.json")
             operation_source_path = save_upload(operation_source, temporary, "operations.json")
-            materialize_assets(assets, asset_manifest, temporary)
+            verify_upload_digests(card_path, contract_path, mapping_path, card_sha256, contract_sha256, mapping_sha256)
+            materialize_assets(assets, asset_manifest, temporary, contract_path)
             return ok(refreeze_task(repository, task_id, workspace, card_path, contract_path, mapping_path, operation_source_path, h1_actor, h2_actor, reason, push))
 
     @app.post("/api/sync")
-    def sync_endpoint(request: Request, body: SyncBody):
-        repository = operator_repo(body.repo)
-        return ok(synchronize(repository, body.workspace, request_actor(request), body.push))
+    async def sync_endpoint(request: Request):
+        # AC-08（api-remote-ready）：sync 改内容上传——请求体 {repo?, actor, push,
+        # proposals}（proposals 必填，缺失 → 400 request.invalid）；submit 类提案的
+        # 证据字节随 multipart 文件上传（按文件名匹配），服务端不按 client 路径读证据；
+        # workspace 仅保留为 collab 经典通道（§8 范围外，维持现行服务端读语义），
+        # 投影写回整体删除（客户端经任务包拉取自行落地）。
+        content_type = request.headers.get("content-type", "")
+        repo = None
+        push = False
+        proposals = None
+        workspace_paths = []
+        evidence_lookup = {}
+        if content_type.startswith("multipart/form-data"):
+            form = await request.form()
+            repo = form.get("repo")
+            push = str(form.get("push") or "").lower() == "true"
+            raw_proposals = form.get("proposals")
+            if raw_proposals is not None:
+                try:
+                    proposals = json.loads(raw_proposals)
+                except (TypeError, ValueError):
+                    raise PlatformError("request.invalid", "proposals is not valid JSON")
+            raw_workspace = form.get("workspace")
+            if raw_workspace:
+                try:
+                    workspace_value = json.loads(raw_workspace)
+                except (TypeError, ValueError):
+                    raise PlatformError("request.invalid", "workspace must be a JSON list of workspace paths")
+                if not isinstance(workspace_value, list):
+                    raise PlatformError("request.invalid", "workspace must be a JSON list of workspace paths")
+                workspace_paths = [str(item) for item in workspace_value]
+            for upload in form.getlist("evidence"):
+                if upload is None or not getattr(upload, "filename", None):
+                    continue
+                name = Path(upload.filename).name
+                evidence_lookup[name] = upload.file.read()
+        else:
+            try:
+                payload = await request.json()
+            except Exception:
+                payload = None
+            if not isinstance(payload, dict):
+                raise PlatformError("request.invalid", "sync body must be a JSON object")
+            repo = payload.get("repo")
+            push = bool(payload.get("push"))
+            proposals = payload.get("proposals")
+            workspace_value = payload.get("workspace")
+            if workspace_value is not None:
+                if not isinstance(workspace_value, list):
+                    raise PlatformError("request.invalid", "workspace must be a list of workspace paths")
+                workspace_paths = [str(item) for item in workspace_value]
+        # 异步接线（T16 返场修复，同 verify_endpoint）：synchronize_uploaded 为阻塞
+        # 调用（git 锁/提交/远端对账），经线程池执行保持事件循环可响应。校验顺序
+        # 保持 repo 解析（AC-01/02）→ proposals 校验 → 应用。
+        def run_sync():
+            repository = operator_repo(repo)
+            if proposals is None:
+                raise PlatformError("request.invalid", "proposals is required")
+            if not isinstance(proposals, list):
+                raise PlatformError("request.invalid", "proposals must be a list")
+            return synchronize_uploaded(
+                repository,
+                proposals,
+                evidence_lookup,
+                request_actor(request),
+                push,
+                workspace_paths=workspace_paths,
+            )
+
+        result = await run_in_threadpool(run_sync)
+        return ok(result)
 
     @app.post("/api/tasks/{task_id}/verify")
-    def verify_endpoint(
-        request: Request,
-        task_id: str,
-        verifier: str = Form(...),
-        confirmed_by: str = Form(...),
-        repo: str | None = Form(None),
-        execute: bool = Form(False),
-        push: bool = Form(False),
-        results: UploadFile | None = File(None),
-        manual_results: UploadFile | None = File(None),
-        review_report: UploadFile | None = File(None),
-    ):
-        check_actor_aliases({"verifier": verifier, "confirmed_by": confirmed_by})
-        repository = operator_repo(repo)
-        with tempfile.TemporaryDirectory(prefix="aidev-web-verify-") as temporary:
-            results_path = save_upload(results, temporary, "results.json")
-            manual_results_path = save_upload(manual_results, temporary, "manual-results.json")
-            review_report_path = save_upload(review_report, temporary, "ai-review-report.json")
-            return ok(verify_task(repository, task_id, verifier, confirmed_by, results_path, execute, manual_results_path, push, review_report_file=review_report_path))
+    async def verify_endpoint(request: Request, task_id: str):
+        # 手工解析（替代 FastAPI Form 注入）：AC-01/02 要求 repo 路径形态/未知逻辑 id
+        # 的拒绝先于字段校验——JSON 体（编排探针）与 multipart 表单（CLI）双形态。
+        content_type = request.headers.get("content-type", "")
+        temporary = tempfile.TemporaryDirectory(prefix="aidev-web-verify-")
+        try:
+            results_file = manual_results_file = review_report_file = None
+            if content_type.startswith("multipart/form-data"):
+                form = await request.form()
+                repo = form.get("repo")
+                verifier = form.get("verifier")
+                confirmed_by = form.get("confirmed_by")
+                execute = str(form.get("execute") or "").lower() == "true"
+                push = str(form.get("push") or "").lower() == "true"
+                for field, fallback in (
+                    ("results", "results.json"),
+                    ("manual_results", "manual-results.json"),
+                    ("review_report", "ai-review-report.json"),
+                ):
+                    upload = form.get(field)
+                    if upload is None or not getattr(upload, "filename", None):
+                        continue
+                    path = Path(temporary.name) / fallback
+                    path.write_bytes(upload.file.read())
+                    if field == "results":
+                        results_file = str(path)
+                    elif field == "manual_results":
+                        manual_results_file = str(path)
+                    else:
+                        review_report_file = str(path)
+            elif content_type.startswith("application/json"):
+                payload = await request.json()
+                if not isinstance(payload, dict):
+                    raise PlatformError("request.invalid", "verify body must be a JSON object")
+                repo = payload.get("repo")
+                verifier = payload.get("verifier")
+                confirmed_by = payload.get("confirmed_by")
+                execute = str(payload.get("execute") or "").lower() == "true"
+                push = str(payload.get("push") or "").lower() == "true"
+            else:
+                repo = verifier = confirmed_by = None
+                execute = push = False
+
+            # 异步接线（T16 返场修复）：verify_task 为阻塞调用（git 提交 + 净室子
+            # 进程用例会回调本服务），必须经线程池执行——留在事件循环会使净室用例
+            # 的 HTTP 自回调全部超时。校验顺序保持 repo 解析 → 字段校验 → verify_task。
+            def run_verify():
+                repository = operator_repo(repo)
+                if not verifier or not confirmed_by:
+                    raise PlatformError("request.invalid", "verifier and confirmed_by are required")
+                check_actor_aliases({"verifier": verifier, "confirmed_by": confirmed_by})
+                return verify_task(repository, task_id, verifier, confirmed_by, results_file, execute, manual_results_file, push, review_report_file=review_report_file)
+
+            result = await run_in_threadpool(run_verify)
+            return ok(result)
+        finally:
+            temporary.cleanup()
 
     @app.post("/api/tasks/{task_id}/reject")
     def reject_endpoint(request: Request, task_id: str, body: RejectBody):
@@ -1221,6 +1422,9 @@ def create_app(default_repo=None):
         card: UploadFile | None = File(None),
         contract: UploadFile | None = File(None),
         mapping: UploadFile | None = File(None),
+        card_sha256: str | None = Form(None),
+        contract_sha256: str | None = Form(None),
+        mapping_sha256: str | None = Form(None),
         asset_manifest: str = Form("[]"),
         assets: list[UploadFile] | None = File(None),
     ):
@@ -1244,7 +1448,10 @@ def create_app(default_repo=None):
             card_path = save_upload(card, temporary, "acceptance-card.json")
             contract_path = save_upload(contract, temporary, "contract.json")
             mapping_path = save_upload(mapping, temporary, "mapping.json")
-            materialize_assets(assets, asset_manifest, temporary)
+            # AC-04/AC-05：veto-propose 同 freeze 走内容上传 + 随件摘要校验。
+            if propose and card_path and contract_path and mapping_path:
+                verify_upload_digests(card_path, contract_path, mapping_path, card_sha256, contract_sha256, mapping_sha256)
+                materialize_assets(assets, asset_manifest, temporary, contract_path)
             if list_flag:
                 return ok({"vetoes": list_vetoes(repository)})
             if propose:

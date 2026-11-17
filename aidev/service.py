@@ -13,7 +13,6 @@ from .domain import (
     REPORT_SECTIONS,
     SPEC_FILES,
     VOIDABLE_BY_SPEC_INVALIDATION,
-    WORKSPACE_DIRECTORIES,
     apply_block,
     apply_claim,
     apply_enhancement,
@@ -30,7 +29,6 @@ from .domain import (
     validate_actor_alias,
     validate_report,
     workspace_agents,
-    resolve_workspace_directory,
 )
 from .errors import NotFoundError, OperationalError, PlatformError
 from .readmodel import parse_requirement_text, pinned_acceptance_card, requirement_coverage
@@ -183,11 +181,8 @@ def validate_req_items_against_requirement(repository, requirement, req_items):
 
 def init_task(repository, workspace, title, requirement, owner, actor, req_items=None, validate_req_items=True):
     repository = ensure_repository(repository)
-    workspace = resolve_workspace_directory(workspace)
-    if workspace == repository or repository in workspace.parents or workspace in repository.parents:
-        raise PlatformError("workspace.invalid_boundary", "agent workspace and authoritative repository must be separate")
-    if workspace.exists() and any(workspace.iterdir()):
-        raise PlatformError("workspace.not_empty", "agent workspace must be empty")
+    # api-remote-ready（REQ-3/AC-07）：workspace 参数语义移除——服务端不创建、
+    # 不写 client 工作区；工作区由客户端在 init-task 成功后经任务包拉取自行落地。
     cleaned_req_items = normalize_req_items(req_items)
     if validate_req_items and cleaned_req_items:
         validate_req_items_against_requirement(repository, requirement, cleaned_req_items)
@@ -217,15 +212,54 @@ def init_task(repository, workspace, title, requirement, owner, actor, req_items
         [authoritative_task.relative_to(repository), event_path(repository).relative_to(repository)],
         f"Initialize {task_id}",
     )
-    workspace.mkdir(parents=True, exist_ok=True)
-    for directory in WORKSPACE_DIRECTORIES:
-        (workspace / directory).mkdir(exist_ok=True)
-    write_task(workspace / "task.md", metadata, body)
-    (workspace / "AGENTS.md").write_text(workspace_agents(metadata), encoding="utf-8", newline="\n")
-    hints_source = Path(repository) / "hints.md"
-    if hints_source.is_file():
-        shutil.copyfile(hints_source, workspace / "hints.md")
     return {"task_id": task_id, "spec_id": spec_id, "state": "Draft", "commit": commit}
+
+
+def verify_frozen_integrity(repository, metadata, actor, entrypoint="operator"):
+    """AC-03（api-remote-ready）：claim 双通道与 verify --execute 的业务前置校验——
+    重算 specs/{spec_id}/{v}/ 钉扎三件套字节 sha256 对 spec_pin；任一不符 → 拒绝
+    （c7.spec_tampered），并落 specification.tamper_detected 安全事件
+    （payload 恰五键：spec_id/version/file/expected/actual）。未钉扎任务零输出跳过。"""
+    pin = metadata.get("spec_pin")
+    if not isinstance(pin, dict):
+        return
+    spec_id = metadata.get("spec_id")
+    version = (pin.get("acceptance_card") or {}).get("version")
+    if not spec_id or not version:
+        return
+    directory = Path(repository) / "specs" / spec_id / str(version)
+    for key, filename in SPEC_FILES.items():
+        expected = (pin.get(key) or {}).get("sha256")
+        if not expected:
+            continue
+        path = directory / filename
+        actual = sha256_file(path) if path.is_file() else ""
+        if actual != expected:
+            payload = {
+                "spec_id": spec_id,
+                "version": str(version),
+                "file": filename,
+                "expected": expected,
+                "actual": actual,
+            }
+            event = make_event(
+                "specification.tamper_detected",
+                metadata.get("task_id"),
+                actor,
+                actor,
+                metadata.get("state"),
+                metadata.get("state"),
+                payload=payload,
+                entrypoint=entrypoint,
+            )
+            events_file = event_path(repository)
+            append_jsonl(events_file, stamp_events(repository, [event]))
+            commit_paths(repository, [events_file.relative_to(repository)], f"Tamper detected {spec_id}@{version}")
+            raise PlatformError(
+                "c7.spec_tampered",
+                f"frozen specification file hash mismatch: {filename}",
+                details=payload,
+            )
 
 
 def validate_workspace_pin(workspace, metadata):
@@ -376,6 +410,32 @@ def materialize_submit_evidence(repository, task_id, evidence_items):
     return relative_paths, rewritten
 
 
+def materialize_submit_evidence_bytes(repository, task_id, evidence_items, bytes_by_name):
+    """AC-08（api-remote-ready）：sync 上传通道的证据落盘——字节随 multipart 上传
+    （按文件名匹配提案引用），服务端不按 client 路径读证据；返回 (仓内相对路径
+    列表, 以仓内相对路径重写的清单)，语义与 materialize_submit_evidence 一致。"""
+    evidence_directory = task_path(repository, task_id).parent / "evidence"
+    evidence_directory.mkdir(parents=True, exist_ok=True)
+    taken = {entry.name for entry in evidence_directory.iterdir()}
+    relative_paths = []
+    rewritten = []
+    for item in evidence_items:
+        name = Path(str(item.get("path") or "evidence")).name or "evidence"
+        content = bytes_by_name[name]
+        name = unique_evidence_name(name, taken)
+        taken.add(name)
+        target = evidence_directory / name
+        target.write_bytes(content)
+        relative = target.relative_to(Path(repository)).as_posix()
+        relative_paths.append(relative)
+        rewritten.append({"path": relative, "sha256": sha256_file(target), "size": target.stat().st_size})
+    return relative_paths, rewritten
+
+
+def evidence_basenames(evidence_items):
+    return [Path(str(item.get("path") or "evidence")).name or "evidence" for item in evidence_items]
+
+
 def resolve_task_evidence(repository, task_id, name):
     """REQ-2：按名定位本任务 evidence 目录内文件；穿越防护与资产端点同构
     （绝对路径、..、目录逃逸一律拒绝；不存在 404）。只解析与读取，不创建目录。"""
@@ -512,26 +572,88 @@ def collect_expired_leases(repository, changed_tasks, new_events):
             changed_tasks[task_id] = (metadata, body)
 
 
-def refresh_workspace(repository, workspace, task_id):
-    authoritative = task_path(repository, task_id)
-    workspace = Path(workspace).resolve()
-    target = workspace / "task.md"
-    if not authoritative.is_file() or not target.is_file():
-        return
-    metadata, body = read_task(authoritative)
-    write_task(target, metadata, body)
-    (workspace / "AGENTS.md").write_text(workspace_agents(metadata), encoding="utf-8", newline="\n")
-    pin = metadata.get("spec_pin")
-    if not pin:
-        return
-    for key, filename in SPEC_FILES.items():
-        source = spec_path(repository, metadata, key)
-        if source.is_file():
-            shutil.copyfile(source, workspace / "contract" / filename)
+PROPOSAL_OPERATIONS = {"claim", "submit", "block", "enhancement"}
+
+
+def validate_uploaded_proposals(proposals):
+    """AC-08：上传提案的结构预检——逐条校验必需键，结构非法的条目以
+    request.invalid 拒收（不影响整批其余提案）；合法条目补齐缺省键后返回。"""
+    cleaned = []
+    rejected = []
+    for proposal in proposals:
+        valid = isinstance(proposal, dict)
+        if valid:
+            proposal = dict(proposal)
+            proposal_id = proposal.get("proposal_id")
+            task_id = proposal.get("task_id")
+            operation = proposal.get("operation")
+            valid = (
+                isinstance(proposal_id, str) and bool(proposal_id.strip())
+                and isinstance(task_id, str) and bool(task_id.strip())
+                and operation in PROPOSAL_OPERATIONS
+                and isinstance(proposal.get("created_at"), str)
+            )
+        if not valid:
+            rejected.append({
+                "proposal_id": proposal.get("proposal_id") if isinstance(proposal, dict) else None,
+                "accepted": False,
+                "code": "request.invalid",
+            })
+            continue
+        if not isinstance(proposal.get("base"), dict):
+            proposal["base"] = {}
+        if not isinstance(proposal.get("parameters"), dict):
+            proposal["parameters"] = {}
+        cleaned.append(proposal)
+    return cleaned, rejected
 
 
 def synchronize(repository, workspaces, actor, push=False):
+    """经典提案通道（in-proc 直调/单机兼容）：从各工作区 outbox 读提案后走公共
+    应用核心；collab 消息维持现行服务端读工作区语义（§8 范围外）。服务端零写
+    client 工作区（api-remote-ready/AC-07），投影由客户端拉取。"""
     repository = ensure_repository(repository)
+    proposals = []
+    for workspace in workspaces:
+        outbox = Path(workspace).resolve() / "outbox"
+        for path in outbox.glob("*.json"):
+            proposal = read_json(path)
+            if isinstance(proposal, dict):
+                proposals.append(proposal)
+    return _synchronize_core(
+        repository,
+        proposals,
+        evidence_lookup=None,
+        actor=actor,
+        push=push,
+        workspace_paths=[Path(workspace).resolve() for workspace in workspaces],
+    )
+
+
+def synchronize_uploaded(repository, proposals, evidence_lookup, actor, push=False, workspace_paths=None):
+    """AC-08 上传通道：POST /api/sync 的 proposals 内容上传应用。证据字节经
+    multipart 随件（按文件名匹配提案引用），服务端不按 client 路径读证据；
+    缺证据的 submit 提案单条拒收 submit.evidence_missing，整批其余提案不受影响。
+    提案 actor/on_behalf_of 维持提案自带值（operator 代同步 agent 提案的经典
+    通道归因不被凭据覆盖；1.1 覆盖纪律作用于请求体顶层 actor）。"""
+    repository = ensure_repository(repository)
+    cleaned, rejected = validate_uploaded_proposals(proposals)
+    for proposal in cleaned:
+        if not isinstance(proposal.get("on_behalf_of"), str) or not proposal["on_behalf_of"].strip():
+            proposal["on_behalf_of"] = actor
+    result = _synchronize_core(
+        repository,
+        cleaned,
+        evidence_lookup=evidence_lookup,
+        actor=actor,
+        push=push,
+        workspace_paths=[Path(path).resolve() for path in (workspace_paths or [])],
+        presorted_results=rejected,
+    )
+    return result
+
+
+def _synchronize_core(repository, proposals, evidence_lookup, actor, push, workspace_paths, presorted_results=None):
     lock_path = repository / ".aidev-sync.lock"
     try:
         descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -540,19 +662,13 @@ def synchronize(repository, workspaces, actor, push=False):
     os.close(descriptor)
     try:
         ensure_remote_syncable(repository)
-        proposals = []
-        for workspace in workspaces:
-            outbox = Path(workspace).resolve() / "outbox"
-            for path in outbox.glob("*.json"):
-                proposal = read_json(path)
-                proposal["workspace"] = str(outbox.parent.resolve())
-                proposals.append(proposal)
-        proposals.sort(key=lambda item: (item["created_at"], item["proposal_id"]))
+        proposals = list(proposals)
+        proposals.sort(key=lambda item: (str(item.get("created_at") or ""), str(item.get("proposal_id") or "")))
         events_file = event_path(repository)
         existing_events = read_jsonl(events_file)
         processed = {item.get("proposal_id") for item in existing_events if item.get("proposal_id")}
         new_events = []
-        results = []
+        results = list(presorted_results or [])
         changed_tasks = {}
         submit_extra_paths = []
         collect_expired_leases(repository, changed_tasks, new_events)
@@ -576,17 +692,40 @@ def synchronize(repository, workspaces, actor, push=False):
                 accepted_event, outcome = apply_claim(proposal, metadata)
             elif operation == "submit":
                 evidence_items = (proposal.get("parameters") or {}).get("evidence") or []
-                for item in evidence_items:
-                    source = Path(str(item.get("path") or ""))
-                    if not source.is_file():
-                        raise PlatformError("submit.evidence_missing", f"evidence file no longer exists: {source}")
+                bytes_by_name = None
+                if evidence_lookup is not None:
+                    missing = [
+                        name for name in evidence_basenames(evidence_items)
+                        if name not in evidence_lookup
+                    ]
+                    if missing:
+                        event, result = rejection(
+                            proposal, metadata, "submit.evidence_missing",
+                            f"evidence bytes were not uploaded with the sync request: {missing}",
+                        )
+                        new_events.append(event)
+                        results.append(result)
+                        continue
+                    bytes_by_name = {
+                        name: evidence_lookup[name] for name in evidence_basenames(evidence_items)
+                    }
+                else:
+                    for item in evidence_items:
+                        source = Path(str(item.get("path") or ""))
+                        if not source.is_file():
+                            raise PlatformError("submit.evidence_missing", f"evidence file no longer exists: {source}")
                 accepted_event, outcome = apply_submit(
                     proposal,
                     metadata,
                     collaboration_validator=lambda task_id, report: validate_report_collaboration(repository, task_id, report),
                 )
                 if accepted_event is not None:
-                    evidence_paths, rewritten = materialize_submit_evidence(repository, proposal["task_id"], evidence_items)
+                    if bytes_by_name is not None:
+                        evidence_paths, rewritten = materialize_submit_evidence_bytes(
+                            repository, proposal["task_id"], evidence_items, bytes_by_name
+                        )
+                    else:
+                        evidence_paths, rewritten = materialize_submit_evidence(repository, proposal["task_id"], evidence_items)
                     accepted_event["payload"]["evidence"] = rewritten
                     submit_extra_paths.extend(evidence_paths)
             elif operation == "block":
@@ -608,7 +747,7 @@ def synchronize(repository, workspaces, actor, push=False):
             if rejected_event is not None:
                 new_events.append(rejected_event)
             results.append(result)
-        collab_events, collab_paths, collab_results = process_collaboration_sync(repository, [Path(workspace).resolve() for workspace in workspaces])
+        collab_events, collab_paths, collab_results = process_collaboration_sync(repository, workspace_paths)
         new_events.extend(collab_events)
         results.extend(collab_results)
         paths = []
@@ -622,12 +761,6 @@ def synchronize(repository, workspaces, actor, push=False):
         paths.extend(collab_paths)
         paths.extend(submit_extra_paths)
         commit = commit_paths(repository, paths, f"Sync {len(proposals)} proposal(s)", push=push) if paths else None
-        refreshed_workspaces = set()
-        for proposal in proposals:
-            workspace = proposal.get("workspace")
-            if workspace and workspace not in refreshed_workspaces:
-                refresh_workspace(repository, workspace, proposal["task_id"])
-                refreshed_workspaces.add(workspace)
         return {"commit": commit, "results": results, "pushed": bool(push and commit)}
     finally:
         lock_path.unlink(missing_ok=True)
@@ -667,6 +800,7 @@ def claim_authoritative(repository, task_id, actor):
         raise PlatformError("claim.not_ready", "only a Ready or Draft task can be claimed", details={"state": metadata.get("state")})
     if lease_is_active(metadata.get("lease")):
         raise PlatformError("claim.lease_active", "task already has an active lease")
+    verify_frozen_integrity(repository, metadata, actor, entrypoint="operator")
     proposal = {
         "proposal_id": new_id("proposal"),
         "task_id": task_id,
@@ -848,6 +982,7 @@ def claim_with_sigt(repository, task_id, actor, on_behalf_of=None):
     now = datetime.now(timezone.utc)
     events = []
     takeover = False
+    verify_frozen_integrity(repository, metadata, actor, entrypoint="agent")
     if state == "In Progress" and lease_is_active(lease):
         if lease.get("claimed_by") != actor:
             raise PlatformError("claim.lease_active", "task already has an active lease held by another actor")

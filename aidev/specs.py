@@ -5,7 +5,7 @@ import stat
 import time
 from pathlib import Path
 
-from .domain import REFREEZABLE_STATES, SPEC_FILES, event_path, make_event, resolve_workspace_directory, task_path, workspace_agents
+from .domain import REFREEZABLE_STATES, SPEC_FILES, event_path, make_event, task_path
 from .errors import OperationalError, PlatformError
 from .gitrepo import commit_paths, ensure_repository
 from .jsonio import append_jsonl, sha256_file, utc_now, write_json
@@ -557,7 +557,8 @@ def execute_baseline_cases(repository, spec_directory, metadata, contract, pin):
 
 def freeze_task(repository, task_id, workspace, card_file, contract_file, mapping_file, operation_source, h1_actor, h2_actor, push=False):
     repository = ensure_repository(repository)
-    workspace = resolve_workspace_directory(workspace) if workspace else None
+    # api-remote-ready（REQ-3/AC-07）：workspace 参数语义移除——服务端不读、
+    # 不写、不创建该路径；投影由客户端在冻结成功后经任务包拉取自行落地。
     lock = repository_lock(repository, "freeze")
     try:
         path = task_path(repository, task_id)
@@ -626,12 +627,6 @@ def freeze_task(repository, task_id, workspace, card_file, contract_file, mappin
         append_jsonl(events_file, stamp_events(repository, events))
         changed = copied + [path.relative_to(repository), events_file.relative_to(repository)]
         commit = commit_paths(repository, changed, f"Freeze {task_id}", push=push)
-        if workspace is not None:
-            write_task(workspace / "task.md", metadata, body)
-            (workspace / "AGENTS.md").write_text(workspace_agents(metadata), encoding="utf-8", newline="\n")
-            (workspace / "contract").mkdir(parents=True, exist_ok=True)
-            for key, filename in SPEC_FILES.items():
-                shutil.copyfile(spec_directory / filename, workspace / "contract" / filename)
         return {"task_id": task_id, "spec_id": spec_id, "version": version, "spec_pin": pin, "state": "Ready", "commit": commit}
     finally:
         lock.unlink(missing_ok=True)
@@ -639,7 +634,7 @@ def freeze_task(repository, task_id, workspace, card_file, contract_file, mappin
 
 def refreeze_task(repository, task_id, workspace, card_file, contract_file, mapping_file, operation_source, h1_actor, h2_actor, reason, push=False):
     repository = ensure_repository(repository)
-    workspace = resolve_workspace_directory(workspace) if workspace else None
+    # workspace 参数语义移除（同 freeze_task，AC-07）。
     if not reason or not reason.strip():
         raise PlatformError("refreeze.reason_required", "refreeze reason is required")
     lock = repository_lock(repository, "freeze")
@@ -764,12 +759,6 @@ def refreeze_task(repository, task_id, workspace, card_file, contract_file, mapp
         append_jsonl(events_file, stamp_events(repository, events))
         changed = copied + [path.relative_to(repository), events_file.relative_to(repository)] + extra_paths
         commit = commit_paths(repository, changed, f"Refreeze {task_id}", push=push)
-        if workspace is not None:
-            write_task(workspace / "task.md", metadata, body)
-            (workspace / "AGENTS.md").write_text(workspace_agents(metadata), encoding="utf-8", newline="\n")
-            (workspace / "contract").mkdir(parents=True, exist_ok=True)
-            for key, filename in SPEC_FILES.items():
-                shutil.copyfile(spec_directory / filename, workspace / "contract" / filename)
         return {"task_id": task_id, "spec_id": spec_id, "old_version": old_version, "version": version, "supersedes": old_version, "spec_pin": new_pin, "state": "Ready", "commit": commit}
     finally:
         lock.unlink(missing_ok=True)

@@ -74,7 +74,7 @@ class FreezeSubmitGateTests(WorkflowTestCase):
         contract["cases"] = [dict(contract["cases"][0], fixtures=["fixture.txt"])]
         contract["assets"] = {"fixture.txt": "0" * 64}
         self.write_json(self.contract, contract)
-        cases.append((None, "c3.asset_hash_mismatch"))
+        cases.append((None, "c3.content_hash_mismatch"))
 
         contract = self.valid_contract()
         contract["cases"] = [dict(contract["cases"][0], expect={})]
@@ -100,7 +100,7 @@ class FreezeSubmitGateTests(WorkflowTestCase):
                     contract = self.valid_contract()
                     contract["cases"] = [dict(contract["cases"][0], fixtures=["fixture.txt"])]
                     self.write_json(self.contract, contract)
-                elif expected_code == "c3.asset_hash_mismatch":
+                elif expected_code == "c3.content_hash_mismatch":
                     contract = self.valid_contract()
                     contract["cases"] = [dict(contract["cases"][0], fixtures=["fixture.txt"])]
                     contract["assets"] = {"fixture.txt": "0" * 64}

@@ -100,8 +100,9 @@ class VetoTests(WorkflowTestCase):
         self.assertFalse((Path(repository) / "specs" / spec_id / "2").exists())
 
         unchanged_card, unchanged_contract, unchanged_mapping = self.veto_artifacts(task_id, must_text="功能正确（修订措辞）")
-        not_required = self.propose_veto(repository, task_id, unchanged_card, unchanged_contract, unchanged_mapping, expected_exit=2)
-        self.assertEqual("veto.not_required", not_required["error"]["code"])
+        harmless = self.propose_veto(repository, task_id, unchanged_card, unchanged_contract, unchanged_mapping)
+        self.assertEqual("proposed", harmless["result"]["status"])
+        self.assertFalse(harmless["result"]["analysis"]["downgrade_required"])
 
     def test_veto_approve_then_refreeze_applies_invalidation(self):
         repository, _ = self.init_state_repo()

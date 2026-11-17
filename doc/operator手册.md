@@ -24,6 +24,8 @@ python aidev-agent.py login --user nfsnyy --password '<口令在 hints.md/口头
 
 8000 常驻服务：`SIGNET_STATE_REPO=<状态仓> SIGNET_PLATFORM_REPO=<平台仓> python -m aidev.web.server --port 8000`（后台）。平台仓代码变更后**必须重启**才生效；服务绑定状态仓，重启不动账本。
 
+**远程就绪（api-remote-ready 已落地）**：operator 动词 `--repo` 只接受逻辑 project_id（绑定仓 project.json 的 project_id）或省略（=服务端绑定存储）；文件系统路径形态一律 400 `repo.invalid_identifier`，未知逻辑 id 404 `repo.not_found`——CLI 与服务可跨机，不依赖共享文件系统。三件套/资产走内容上传（freeze/refreeze/veto 随件 `card_sha256`/`contract_sha256`/`mapping_sha256` 摘要 + `[{"path","sha256"}]` 清单，CLI 自动计算）；`--workspace` 纯客户端本地使用，verb 成功后投影自动经任务包拉取落盘，服务端零写 client 工作区。
+
 ## 3. 任务生命周期仪式（每任务标准序列）
 
 ```
@@ -45,8 +47,9 @@ python aidev-agent.py login --user nfsnyy --password '<口令在 hints.md/口头
 ## 4. 关键命令模板
 
 ```bash
-# 建任务（工作区由 init-task 创建）
-python aidev-operator.py init-task --repo <状态仓> --workspace <工作区路径> --title '<标题>' --requirement <需求id> --owner nfsnyy --actor nfsnyy
+# 建任务（工作区不由服务端创建；客户端在命令成功后经任务包拉取自行落地 <本地目录>）
+python aidev-operator.py init-task --title '<标题>' --requirement <需求id> --owner nfsnyy --actor nfsnyy \
+  --workspace <本地目录>   # 可省略；--repo 仅接受逻辑 id，省略=服务端绑定存储
 
 # 签发 sigt（编排式 claim，任务转 In Progress；返回 handoff_token——第一时间存 .sigt-*.txt）
 curl -s -X POST "http://127.0.0.1:8000/api/tasks/<task_id>/claims" \
@@ -55,21 +58,23 @@ curl -s -X POST "http://127.0.0.1:8000/api/tasks/<task_id>/claims" \
 python -c "from aidev.gitrepo import ensure_repository; from aidev.authn import mint_sigt; \
 print(mint_sigt('<task_id>','nfsnyy',str(ensure_repository('<状态仓>'))))"
 
-# freeze（从工作区 contract/ 读三件套；CWD 必须在 contract 上级，相对路径以 CWD 解析）
-python aidev-operator.py freeze --repo <状态仓> --task-id <id> --workspace <工作区> \
-  --acceptance-card contract/acceptance-card.json --contract contract/contract.json \
-  --mapping contract/mapping.json --h1-actor nfsnyy --h2-actor nfsnyy
+# freeze（内容上传：CLI 本地读三件套，自动附 card_sha256/contract_sha256/mapping_sha256
+# 随件摘要与 [{"path","sha256"}] 资产清单；--repo 省略=绑定存储；成功后投影自动落盘 --workspace）
+python aidev-operator.py freeze --task-id <id> \
+  --acceptance-card <本地路径>/acceptance-card.json --contract <本地路径>/contract.json \
+  --mapping <本地路径>/mapping.json --h1-actor nfsnyy --h2-actor nfsnyy \
+  [--repo <逻辑 id>] [--workspace <本地目录>]
 # refreeze 追加 --reason '...'；其余参数同
 
 # 对账用例（从冻结 spec 目录跑才是真净室基线；跑完删 __pycache__）
 cd <状态仓>/specs/<spec_id>/<version> && python case-xxx.py
 
 # verify（先写 manual-results 文件，AC-人审一条，证据 {path,sha256}）
-python aidev-operator.py verify --repo <状态仓> --task-id <id> --execute \
+python aidev-operator.py verify --task-id <id> --execute \
   --manual-results <证据json> --verifier operator --confirmed-by nfsnyy
 
 # close（ship 需 SIGNET_PLATFORM_REPO；推双仓）
-python aidev-operator.py close --repo <状态仓> --task-id <id> --decision accept \
+python aidev-operator.py close --task-id <id> --decision accept \
   --actor nfsnyy --reason '...' --push --ship
 ```
 

@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 
 from .domain import (
@@ -20,9 +21,9 @@ from .runner import execute_contract_cases, frozen_contract, machine_criterion_r
 from .service import (
     create_trace_review_task,
     propagate_pin_invalidation,
-    refresh_workspace,
     stamp_events,
     task_log,
+    verify_frozen_integrity,
 )
 from .specs import repository_lock
 from .taskfile import read_task, write_task
@@ -38,6 +39,22 @@ def lifecycle_lock(repository):
         raise OperationalError("lifecycle.already_running", "another lifecycle operation holds the repository lock") from error
     os.close(descriptor)
     return lock_path
+
+
+def lifecycle_lock_wait(repository, timeout_seconds=30.0, poll_seconds=0.1):
+    """生命周期锁自旋获取（verify --execute 净室窗口重取用）：净室用例回调的
+    reject/adjudicate/verify 等动词短小临界区，重取时短暂自旋而非立刻 409。"""
+    lock_path = Path(repository) / ".aidev-lifecycle.lock"
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(descriptor)
+            return lock_path
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise OperationalError("lifecycle.already_running", "another lifecycle operation holds the repository lock")
+            time.sleep(poll_seconds)
 
 
 def persist(repository, changed_tasks, events, extra_paths, message, push):
@@ -299,8 +316,22 @@ def verify_task(repository, task_id, verifier, confirmed_by, results_file=None, 
         metadata, body = read_task(path)
         if metadata.get("state") != "Implemented":
             raise PlatformError("verify.invalid_state", "only an Implemented task can be verified", details={"state": metadata.get("state")})
+        # AC-03（api-remote-ready）：verify --execute 业务前置——重算钉扎三件套
+        # 字节对 spec_pin，篡改件不进入净室（c7.spec_tampered + 安全事件）。
+        verify_frozen_integrity(repository, metadata, verifier, entrypoint="operator")
         if execute:
-            document = build_executed_document(repository, metadata, verifier, manual_results_file, review_report_file=review_report_file)
+            # 净室用例经 HTTP 回调本服务并合法触发 reject/adjudicate/verify 等生命周期
+            # 动词（T16 冻结案即如此，且须按其语义响应），用例执行期间不得持有全仓
+            # 生命周期锁：释放锁执行净室，落账前重新获取并复核任务未被并发改动。
+            lock.unlink(missing_ok=True)
+            try:
+                document = build_executed_document(repository, metadata, verifier, manual_results_file, review_report_file=review_report_file)
+            finally:
+                lock = lifecycle_lock_wait(repository)
+            fresh_metadata, _ = read_task(path)
+            if fresh_metadata.get("state") != metadata.get("state") or fresh_metadata.get("spec_pin") != metadata.get("spec_pin"):
+                raise PlatformError("verify.invalid_state", "task changed while verification cases were executing", details={"state": fresh_metadata.get("state")})
+            metadata = fresh_metadata
         else:
             document = load_json_document(results_file, "verify.invalid_results")
         if document.get("verifier") != verifier:
@@ -378,9 +409,8 @@ def reject_task(repository, task_id, category, reason, actor, workspace=None, pu
             event = make_event("task.void", task_id, actor, actor, before, "Void", payload={"category": category, "reason": reason})
         metadata["updated_at"] = utc_now()
         result = persist(repository, {task_id: (metadata, body)}, [event], [], f"Reject {task_id}", push)
-        if workspace:
-            refresh_workspace(repository, workspace, task_id)
-            result["workspace_refreshed"] = True
+        # AC-07（api-remote-ready）：workspace 参数语义移除——服务端零写 client
+        # 工作区，workspace_refreshed 键不再出现；投影由客户端拉取。
         return result
     finally:
         lock.unlink(missing_ok=True)
@@ -545,9 +575,7 @@ def adjudicate_task(repository, task_id, category, reason, actor, workspace=None
         raise PlatformError("adjudicate.reason_required", "adjudication reason is required")
     if category == "definition":
         result = invalidate_specification(repository, task_id, actor, reason, push=push)
-        if workspace:
-            refresh_workspace(repository, workspace, task_id)
-            result["workspace_refreshed"] = True
+        # workspace 参数语义移除（AC-07）：服务端零写 client 工作区。
         return result
     lock = lifecycle_lock(repository)
     try:
@@ -562,9 +590,7 @@ def adjudicate_task(repository, task_id, category, reason, actor, workspace=None
         metadata["updated_at"] = utc_now()
         event = make_event("block.adjudicated", task_id, actor, actor, "Blocked", "Ready", payload={"category": category, "reason": reason})
         result = persist(repository, {task_id: (metadata, body)}, [event], [], f"Adjudicate {task_id}", push)
-        if workspace:
-            refresh_workspace(repository, workspace, task_id)
-            result["workspace_refreshed"] = True
+        # workspace 参数语义移除（AC-07）：服务端零写 client 工作区。
         return result
     finally:
         lock.unlink(missing_ok=True)

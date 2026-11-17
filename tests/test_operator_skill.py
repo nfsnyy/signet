@@ -94,6 +94,15 @@ class OperatorSkillDriftTests(unittest.TestCase):
     def test_freeze_door_semantics_documented(self):
         self.assertIn("Implemented 未钉扎", self.body)
 
+    def test_remote_ready_revision_documented(self):
+        # api-remote-ready（REQ-5/AC-11）同步修订：单机假设旧锚消失，远程就绪
+        # 表述（repo 逻辑 id + card_sha256 内容上传摘要）落地。
+        for marker in ("单机假设声明（api-remote-ready 落地前）", "仅当 CLI 与服务同机",
+                       "freeze --repo <状态仓> --task-id", "CWD 必须在 contract/ 上级"):
+            self.assertNotIn(marker, self.body)
+        for marker in ("repo 逻辑 id", "card_sha256"):
+            self.assertIn(marker, self.body)
+
 
 if __name__ == "__main__":
     unittest.main()

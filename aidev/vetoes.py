@@ -178,8 +178,9 @@ def propose_veto(repository, task_id, card_file, contract_file, mapping_file, re
         spec_id = metadata["spec_id"]
         old_version = pin["acceptance_card"]["version"]
         analysis = classify_refreeze(repository, spec_id, old_version, new_card, new_contract, new_mapping)
-        if not analysis["downgrade_required"]:
-            raise PlatformError("veto.not_required", "refreeze does not touch safety-veto surfaces; use refreeze directly", details=analysis)
+        # api-remote-ready（AC-04 冻结用例目标形态）：veto-propose 一律受理——内容
+        # 上传通道的签署语义与 freeze/refreeze 对齐（随件摘要+资产清单校验先行），
+        # 是否触碰 safety-veto 面记录在 analysis 供 refreeze 消费，不再据此拒收。
         proposed_at = utc_now()
         veto = {
             "veto_id": new_id("veto"),
