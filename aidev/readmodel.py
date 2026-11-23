@@ -283,16 +283,31 @@ def requirement_merges(repository, requirement_id):
     return merges
 
 
+def _requirement_markdown_files(requirements_dir):
+    """requirements/<id>.md 文件形态需求（T17 骨架 getting-started.md 同构呈现）：
+    返回 [(requirement_id, fields, body)]；frontmatter 损坏的跳过。"""
+    items = []
+    for path in sorted(Path(requirements_dir).glob("*.md")):
+        try:
+            fields, body = parse_requirement_text(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        items.append((path.stem, fields, body))
+    return items
+
+
 def list_requirements(repository):
     """GET /api/requirements 的 result.requirements 负载（按 requirement_id 排序）。
 
     进度口径（AC-03）= 已覆盖条目数 / 条目总数（条目总数为 0 时 progress=0）；
-    旧「Done 任务数 / 非 Void 任务总数」口径已退场。
+    旧「Done 任务数 / 非 Void 任务总数」口径已退场。目录形态
+    （<id>/requirement.md）与文件形态（<id>.md，T17 骨架引导需求）并集呈现。
     """
     repository = Path(repository)
     tasks = list_tasks(repository)
     index = requirement_carrier_index(repository, tasks)
     entries = []
+    seen = set()
     requirements_dir = repository / "requirements"
     if requirements_dir.is_dir():
         for entry in sorted(requirements_dir.iterdir()):
@@ -304,7 +319,13 @@ def list_requirements(repository):
                 fields, body = parse_requirement_text(text)
             except (OSError, ValueError):
                 continue
+            seen.add(entry.name)
             entries.append(_requirement_entry(entry.name, fields, body, tasks, index))
+        for requirement_id, fields, body in _requirement_markdown_files(requirements_dir):
+            if requirement_id in seen:
+                continue
+            entries.append(_requirement_entry(requirement_id, fields, body, tasks, index))
+    entries.sort(key=lambda item: item["requirement_id"])
     return entries
 
 
@@ -330,12 +351,16 @@ def requirement_detail(repository, requirement_id):
     负载含 metadata（title/status/priority/owner/source/progress）、正文原稿
     （body）、判据条目（entries，编号列表）、条目反查（entries_trace：每
     条目的承载任务与 AC 编号对应 + 推导状态徽标口径）、backlog 归并留痕
-    （merges）与反查任务（tasks）。
+    （merges）与反查任务（tasks）。目录形态优先，缺失时回落文件形态
+    （requirements/<id>.md，T17 骨架引导需求）。
     """
     repository = Path(repository)
     file_path = repository / "requirements" / requirement_id / "requirement.md"
     if not file_path.is_file():
-        return None
+        alternative = repository / "requirements" / f"{requirement_id}.md"
+        if not alternative.is_file():
+            return None
+        file_path = alternative
     try:
         text = file_path.read_text(encoding="utf-8")
     except OSError:

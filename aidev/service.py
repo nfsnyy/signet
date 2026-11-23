@@ -9,6 +9,7 @@ from pathlib import Path
 from . import distribution
 from .authn import mint_sigt
 from .collaboration import collaboration_overview, process_collaboration_sync, validate_report_collaboration
+from . import projects as project_store
 from .domain import (
     REPORT_SECTIONS,
     SPEC_FILES,
@@ -30,7 +31,7 @@ from .domain import (
     validate_report,
     workspace_agents,
 )
-from .errors import NotFoundError, OperationalError, PlatformError
+from .errors import AuthorizationError, NotFoundError, OperationalError, PlatformError
 from .readmodel import parse_requirement_text, pinned_acceptance_card, requirement_coverage
 from .gitrepo import commit_paths, ensure_remote_syncable, ensure_repository, initialize_repository
 from .jsonio import append_jsonl, new_id, read_json, read_jsonl, sha256_file, utc_now, write_json
@@ -829,19 +830,28 @@ def claim_authoritative(repository, task_id, actor):
         "task_id": task_id,
         "state": metadata["state"],
         "lease": metadata["lease"],
-        "handoff_token": mint_sigt(task_id, actor, str(repository)),
+        "handoff_token": mint_sigt(task_id, actor, sigt_repo_field(repository)),
         "authoritative": True,
         "commit": commit,
     }
 
 
+def sigt_repo_field(repository):
+    """T17：sigt 的 repo 字段记项目 project_id（逻辑 id）；仓无项目标识时（未初始化
+    临时仓/兼容旧形态）回落仓路径字符串。任务解析时校验该字段与任务所属项目一致。"""
+    return project_store.project_id_for_repository(repository) or str(Path(repository).resolve())
+
+
 def requirement_body(repository, requirement_id):
-    """requirements/{id}/requirement.md 去 frontmatter 后的原文；无此需求返回 None。"""
+    """requirements/{id}/requirement.md 去 frontmatter 后的原文；无此需求返回 None。
+    目录形态优先，缺失回落文件形态 requirements/<id>.md（T17 骨架引导需求）。"""
     if not requirement_id:
         return None
     file_path = Path(repository) / "requirements" / requirement_id / "requirement.md"
     if not file_path.is_file():
-        return None
+        file_path = Path(repository) / "requirements" / f"{requirement_id}.md"
+        if not file_path.is_file():
+            return None
     try:
         text = file_path.read_text(encoding="utf-8")
         _fields, body = parse_requirement_text(text)
@@ -961,7 +971,7 @@ def last_claim_delegate(repository, task_id):
     return None
 
 
-def claim_with_sigt(repository, task_id, actor, on_behalf_of=None):
+def claim_with_sigt(repository, task_id, actor, on_behalf_of=None, sigt_repo=None):
     """sigt 幂等接管 + 续期：直接改写权威账本并提交，响应携带完整任务包。
 
     - In Progress 且同执行者（actor 且 on_behalf_of 与最近一次 claim 一致）持活跃租约：
@@ -970,9 +980,19 @@ def claim_with_sigt(repository, task_id, actor, on_behalf_of=None):
       （task.claimed 事件，状态进入 In Progress）；
     - 他人持活跃租约（actor 不同）：拒绝（claim.lease_active）。
     AC-16 委托流归因：事件 actor=签发人（问责锁定），on_behalf_of=执行者（缺省回落 actor）。
+    T17：sigt 的 repo 字段（项目 project_id 或兼容的仓路径）必须与任务所属项目
+    一致，不符即拒（403 authz.project_denied，零副作用）。
     """
     repository = ensure_repository(repository)
     on_behalf_of = on_behalf_of or actor
+    if sigt_repo is not None:
+        expected = {sigt_repo_field(repository), str(Path(repository).resolve())}
+        if sigt_repo not in expected:
+            raise AuthorizationError(
+                "authz.project_denied",
+                f"sigt 绑定项目 {sigt_repo} 与任务所属项目不符",
+                details={"sigt_project": sigt_repo, "task_project": sigt_repo_field(repository)},
+            )
     path = task_path(repository, task_id)
     if not path.is_file():
         raise PlatformError("task.not_found", f"task does not exist: {task_id}")

@@ -213,6 +213,17 @@ def note_login_success(alias):
         _failed_logins.pop(alias, None)
 
 
+def set_session_active_project(token, project_id):
+    """T17 会话活动项目：页面切换器写入，repo 省略时落点。"""
+    if not token:
+        return None
+    with _sessions_lock:
+        session = _sessions.get(token)
+        if session is not None:
+            session["active_project"] = project_id
+        return session
+
+
 def _b64url_json(document):
     body = json.dumps(document, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return base64.urlsafe_b64encode(body).decode("ascii").rstrip("=")
@@ -268,20 +279,24 @@ def _iso_utc(value):
     return moment.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def mint_pat(user, scope, obo, exp):
+def mint_pat(user, scope, obo, exp, project_id=None):
     """签发 PAT（与 sigt 同构：pat- + b64url(payload) + HMAC-SHA256）。
 
-    payload = {v, user（签发人）, scope, obo（执行者标签）, exp（过期时刻，ISO-8601Z）}。
-    exp 接受 ISO 字符串或 datetime；完整令牌只由调用方在签发当次回显。
+    payload = {v, user（签发人）, scope, obo（执行者标签）, exp（过期时刻，ISO-8601Z），
+    project_id（项目绑定，T17）}。exp 接受 ISO 字符串或 datetime；完整令牌只由
+    调用方在签发当次回显。
     """
     secret = load_server_secret()
-    segment = _b64url_json({
+    payload = {
         "v": PAT_VERSION,
         "user": user,
         "scope": list(scope or []),
         "obo": obo,
         "exp": _iso_utc(exp),
-    })
+    }
+    if project_id is not None:
+        payload["project_id"] = project_id
+    segment = _b64url_json(payload)
     signature = hmac.new(secret, segment.encode("ascii"), hashlib.sha256).hexdigest()[:32]
     return f"{PAT_PREFIX}{segment}-{signature}"
 
@@ -305,6 +320,8 @@ def parse_pat(token):
     if not isinstance(document.get("v"), int) or not isinstance(document.get("user"), str) \
             or not isinstance(document.get("obo"), str) or not isinstance(document.get("exp"), str) \
             or not isinstance(document.get("scope"), list):
+        return None
+    if "project_id" in document and not isinstance(document.get("project_id"), str):
         return None
     return {"segment": segment, "signature": signature, "payload": document}
 
@@ -354,8 +371,8 @@ def pat_expires_at(expires_in):
     return _iso_utc(datetime.now(timezone.utc) + PAT_EXPIRES_IN[expires_in])
 
 
-def register_pat(user, label, scope, obo, expires_in, token):
-    """平台侧只落散列 + 元数据；完整令牌仅在签发当次由调用方回显。"""
+def register_pat(user, label, scope, obo, expires_in, token, project_id=None):
+    """平台侧只落散列 + 元数据（含 project_id 项目绑定）；完整令牌仅在签发当次回显。"""
     expires_at = pat_expires_at(expires_in)
     cleaned_scope = []
     for item in scope or []:
@@ -380,6 +397,7 @@ def register_pat(user, label, scope, obo, expires_in, token):
         "last_used": None,
         "status": "active",
         "token_sha256": _token_digest(token),
+        "project_id": project_id,
     }
     save_pats(pats)
     return pats[pat_id]

@@ -15,9 +15,12 @@ from pydantic import BaseModel, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from .. import authn, distribution, readmodel
+from .. import projects as project_store
 from ..collaboration import collab_answer, collab_send, collaboration_overview
-from ..domain import lease_is_active, task_path, validate_actor_alias
+from ..domain import lease_is_active, task_path, validate_actor_alias, make_event, event_path
 from ..errors import AuthorizationError, NotFoundError, PlatformError
+from ..gitrepo import commit_paths
+from ..jsonio import append_jsonl
 from ..lifecycle import adjudicate_task, close_task, reject_task, ship_task, verify_task, void_task
 from ..service import (
     block,
@@ -39,6 +42,8 @@ from ..service import (
     record_pat_event,
     resolve_spec_asset,
     resolve_task_evidence,
+    sigt_repo_field,
+    stamp_events,
     status,
     submit,
     submit_authoritative,
@@ -96,7 +101,7 @@ LOGIN_PAGE = """<!doctype html>
 <link rel="stylesheet" href="/static/style.css"></head>
 <body>
 <div class="topbar"><span class="brand">signet</span>
-<nav><a href="/">概况</a><a href="/tasks">任务</a><a href="/requirements">需求</a><a href="/guide">接入指南</a></nav>
+<nav><a href="/">概况</a><a href="/tasks">任务</a><a href="/requirements">需求</a><a href="/projects">项目</a><a href="/guide">接入指南</a></nav>
 <span class="user">未登录</span></div>
 <div class="page" style="display:flex;justify-content:center;padding-top:80px;">
   <form method="post" action="/login" class="card">
@@ -118,7 +123,7 @@ _LOGIN_SHELL = """<!doctype html>
 <link rel="stylesheet" href="/static/style.css"></head>
 <body>
 <div class="topbar"><span class="brand">signet</span>
-<nav><a href="/">概况</a><a href="/tasks">任务</a><a href="/requirements">需求</a><a href="/guide">接入指南</a></nav>
+<nav><a href="/">概况</a><a href="/tasks">任务</a><a href="/requirements">需求</a><a href="/projects">项目</a><a href="/guide">接入指南</a></nav>
 <span class="user">未登录</span></div>
 <div class="page" style="display:flex;justify-content:center;padding-top:80px;">
   <div class="card" style="max-width:520px;border:1px solid #e5e7eb;border-radius:10px;padding:20px;">
@@ -164,8 +169,36 @@ class ActorValidatingModel(BaseModel):
 
 class ClaimBody(ActorValidatingModel):
     workspace: str | None = None
+    repo: str | None = None
     actor: str | None = None
     on_behalf_of: str | None = None
+
+
+class ProjectRegisterBody(ActorValidatingModel):
+    name: str | None = None
+    state_repo: str | None = None
+    code_repo: str | None = None
+    credentials: dict | None = None
+    actor: str | None = None
+
+
+class ProjectConfigureBody(ActorValidatingModel):
+    name: str | None = None
+    credentials: dict | None = None
+    state_repo: str | None = None
+    code_repo: str | None = None
+    actor: str | None = None
+
+
+class CredentialRemoveBody(ActorValidatingModel):
+    repo: str | None = None
+    actor: str | None = None
+
+
+class PatRevokeBody(ActorValidatingModel):
+    """POST /api/pats/{pat_id}/revoke 的可选 JSON 体（空体合法）。"""
+
+    actor: str | None = None
 
 
 class LoginBody(BaseModel):
@@ -266,6 +299,7 @@ class PatIssueBody(BaseModel):
     label: str
     scope: list
     expires_in: str
+    project_id: str | None = None
 
 
 class RequirementCreateBody(BaseModel):
@@ -274,12 +308,14 @@ class RequirementCreateBody(BaseModel):
     body: str | None = None
     entries: list = []
     source: str | None = None
+    repo: str | None = None
 
 
 class RequirementUpdateBody(BaseModel):
     body: str | None = None
     entries: list = []
     source: str | None = None
+    repo: str | None = None
 
 
 class MergeBody(BaseModel):
@@ -289,6 +325,7 @@ class MergeBody(BaseModel):
 
 class ConfirmBody(BaseModel):
     entries: list = []
+    repo: str | None = None
 
 
 def save_upload(upload, directory, fallback_name):
@@ -388,7 +425,8 @@ def authenticate_header(authorization):
 
     返回 (context, error)：error 为 (status_code, payload)（PAT 过期/吊销的
     专属 401）或 None。Bearer 值带 pat- 前缀时按 PAT 校验（签名 → 过期 →
-    吊销），与 sigt 同构的能力令牌面。
+    吊销），与 sigt 同构的能力令牌面。context 附令牌 repo/项目绑定字段
+    （T17 项目边界裁决）与会话 active_project。
     """
     if not authorization:
         return None, None
@@ -411,22 +449,29 @@ def authenticate_header(authorization):
                 "obo": payload.get("obo") or payload["user"],
                 "scope": list(payload.get("scope") or []),
                 "token": value,
+                "project_id": payload.get("project_id"),
                 "via": "bearer",
             }
             return context, None
         session = authn.find_session(value)
         if session:
-            return {"kind": "user", "actor": session["user"], "task": None, "via": "bearer"}, None
+            return {
+                "kind": "user",
+                "actor": session["user"],
+                "task": None,
+                "via": "bearer",
+                "active_project": session.get("active_project"),
+            }, None
         payload = authn.verify_sigt(value)
         if payload is not None:
             # Bearer 形态的能力令牌：sigt 经 Bearer 传输同样识别（与 sigt scheme 同构），
             # 供任务绑定类读端点按 sigt 任务范围做授权分流。
-            return {"kind": "sigt", "actor": payload["actor"], "task": payload["task"], "via": "sigt"}, None
+            return {"kind": "sigt", "actor": payload["actor"], "task": payload["task"], "repo": payload.get("repo"), "via": "sigt"}, None
         return None, None
     if scheme == "sigt" and value:
         payload = authn.verify_sigt(value)
         if payload is not None:
-            return {"kind": "sigt", "actor": payload["actor"], "task": payload["task"], "via": "sigt"}, None
+            return {"kind": "sigt", "actor": payload["actor"], "task": payload["task"], "repo": payload.get("repo"), "via": "sigt"}, None
         return None, None
     return None, None
 
@@ -478,6 +523,10 @@ def create_app(default_repo=None):
     # 定位被测代码，服务端不再读取它作为状态仓。
     configured_repo = default_repo or os.environ.get("SIGNET_STATE_REPO")
     authn.ensure_data_dir()
+    if configured_repo:
+        configured_repo = str(Path(configured_repo).resolve())
+        # T17 启动自检：绑定仓登记/核对为内置项目（注册表恰一个 builtin）。
+        project_store.ensure_builtin(configured_repo)
     app = FastAPI(title="signet 平台服务", version="0.3.0")
     # 统一设计系统静态资源：原型 style.css 固定挂 /static/style.css（AC-01）。
     app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")),
@@ -497,36 +546,97 @@ def create_app(default_repo=None):
             return True
         return bool(SEPARATOR_REPO.search(value))
 
-    def resolve_repo(request_repo):
-        """AC-02 解析次序（绑定服务）：① 省略 → 服务端绑定存储；② 路径形态 → 400
-        repo.invalid_identifier（零副作用）；③ 逻辑 id 未命中绑定仓 project_id → 404
-        repo.not_found（零副作用）；④ 命中 → 绑定存储。
-        未绑定服务（单机开发/基线测试）维持现行本地仓直用语义：请求 repo 原样
-        采用，由 ensure_repository 给出权威错误；省略仍落 git.not_repository。"""
+    def resolve_repo(request_repo, for_write=False, session=None):
+        """T17 泛化解析次序：① 省略 → 会话活动项目（无则内置项目=绑定存储）；
+        ② 路径形态 → 400 repo.invalid_identifier（T16 钉名，零副作用）；
+        ③ 逻辑 id=内置 project_id → 绑定存储（T16 语义不动）；
+        ④ 命中注册表 → 该项目服务端克隆（读前 fetch 整合 / 写前 fetch+冲突裁决：
+        behind 自动 ff 整合，diverged 写动词拒 sync.diverged_remote 零副作用）；
+        ⑤ 未知逻辑 id → 404 repo.not_found（T16 钉名）。停用项目 → 409
+        project.disabled（读写一律，零副作用）。未绑定服务维持本地仓直用语义。"""
         request_repo = (request_repo or "").strip() or None
         if configured_repo:
             if not request_repo:
-                return configured_repo
+                active = (session or {}).get("active_project")
+                if active:
+                    request_repo = active
+                else:
+                    return configured_repo
             if is_path_form_repo(request_repo):
                 raise PlatformError(
                     "repo.invalid_identifier",
-                    "repo 仅接受逻辑 project_id 或省略（落服务端绑定存储），文件系统路径形态一律拒绝",
+                    "repo 仅接受逻辑 project_id 或省略（落会话活动项目/服务端绑定存储），文件系统路径形态一律拒绝",
                     details={"repo": request_repo},
                 )
-            bound_project_id = project_metadata(configured_repo)
-            if bound_project_id and request_repo == bound_project_id:
+            builtin_pid = project_metadata(configured_repo)
+            if builtin_pid and request_repo == builtin_pid:
                 return configured_repo
-            raise NotFoundError(
-                "repo.not_found",
-                f"unknown repository project_id: {request_repo}",
-                details={"repo": request_repo, "bound_project_id": bound_project_id},
-            )
+            record = project_store.get_project(request_repo)
+            if record is None:
+                raise NotFoundError(
+                    "repo.not_found",
+                    f"unknown repository project_id: {request_repo}",
+                    details={"repo": request_repo, "bound_project_id": builtin_pid},
+                )
+            if record.get("status") == "disabled":
+                raise PlatformError(
+                    "project.disabled",
+                    f"project {request_repo} is disabled; all reads and writes are rejected",
+                    exit_code=3,
+                    details={"project_id": request_repo},
+                )
+            clone = project_store.ensure_clone(record)
+            project_store.fetch_integrate(clone, for_write=for_write)
+            return str(clone)
         if not request_repo:
             raise PlatformError(
                 "git.not_repository",
                 "未指定状态仓库：请在请求中提供 repo，或服务端以 SIGNET_STATE_REPO 启动",
             )
         return request_repo
+
+    def request_context(request):
+        """公开读端点（详情/状态匿名可读）可能未经中间件鉴权——auth 缺失容忍。"""
+        return getattr(request.state, "auth", None)
+
+    def task_repository(request, task_id, repo_value, for_write=False):
+        """任务端点 repo 定位：显式 repo → 该项目内必须存在（跨项目读 → 404
+        task.not_found）；省略 → 活动/绑定存储优先，未命中按注册表克隆检索
+        （项目 A 的任务经省略 repo 的写动词/claims 可达，B 上下文显式读仍 404）。
+        全局定位命中后同样执行项目状态/凭据边界（AC-03/AC-09）：定位项目停用
+        → 409 project.disabled（读写一律，先于任何读写副作用）；PAT 定位到绑定
+        项目之外 → 403 authz.project_denied（先边界后状态，与中间件同序）。"""
+        context = request_context(request)
+        if repo_value:
+            repository = resolve_repo(repo_value, for_write=for_write, session=context)
+            if not task_path(repository, task_id).is_file():
+                raise NotFoundError("task.not_found", f"task does not exist in project context: {task_id}")
+            return repository
+        repository = resolve_repo(None, for_write=for_write, session=context)
+        if task_path(repository, task_id).is_file():
+            return repository
+        found = project_store.search_task_repo(task_id, skip_repository=repository)
+        if found is not None:
+            found_pid = project_store.project_id_for_repository(found)
+            if found_pid:
+                if (context or {}).get("kind") == "pat":
+                    pat_project = ((context or {}).get("project_id") or "").strip()
+                    if pat_project and found_pid != pat_project:
+                        raise AuthorizationError(
+                            "authz.project_denied",
+                            "PAT 仅限其绑定项目使用，跨项目一律拒绝（全局定位不豁免项目边界）",
+                        )
+                record = project_store.get_project(found_pid)
+                if record is not None and record.get("status") == "disabled":
+                    raise PlatformError(
+                        "project.disabled",
+                        f"project {found_pid} is disabled; all reads and writes are rejected",
+                        exit_code=3,
+                        details={"project_id": found_pid},
+                    )
+            project_store.fetch_integrate(found, for_write=for_write)
+            return str(found)
+        raise NotFoundError("task.not_found", f"task does not exist: {task_id}")
 
     def operator_repo(request_repo):
         repository = resolve_repo(request_repo)
@@ -584,6 +694,80 @@ def create_app(default_repo=None):
             content=error_payload("internal.error", str(exc), {"type": type(exc).__name__}),
         )
 
+    async def _pat_target_project(request, context):
+        """PAT 项目边界裁决的目标项目解析：/api/projects/{pid} 路径段 → repo 查询
+        参数 → JSON 体 project_id/repo（sync/PAT 通道体均为 JSON；credentials/remove
+        体的 repo 为凭据种类 state|code，不作项目解析）→ 会话活动项目 → 内置项目。
+        未知/路径形态返回原值由下游钉名错误处理（边界裁决只比对注册表已知项目）。"""
+        path = request.url.path
+        if path.startswith("/api/projects/"):
+            segment = path[len("/api/projects/"):].split("/")[0]
+            if segment:
+                return segment
+        repo = (request.query_params.get("repo") or "").strip()
+        if not repo and request.method == "POST":
+            content_type = request.headers.get("content-type", "")
+            if content_type.startswith("application/json"):
+                try:
+                    body = await request.body()
+                    document = json.loads(body.decode("utf-8")) if body else {}
+                except (ValueError, UnicodeDecodeError):
+                    document = {}
+                if isinstance(document, dict):
+                    repo = str(document.get("project_id") or document.get("repo") or "").strip()
+        if not repo:
+            repo = (context.get("active_project") or "").strip()
+        if not repo and configured_repo:
+            builtin_pid = project_metadata(configured_repo)
+            if builtin_pid:
+                repo = builtin_pid
+        return repo or None
+
+    async def _guard_public_read(request):
+        """公开读端点（T6 匿名可读）携带凭据时的裁决：PAT 先项目边界后操作权限
+        （任务读面 PAT 一律 403 authz.pat_scope_denied；跨项目 → project_denied）；
+        sigt 注入 state.auth 由端点守卫裁决任务/项目绑定；匿名（无 Authorization
+        头）/未识别凭据零干预。"""
+        authorization = request.headers.get("Authorization")
+        if not authorization:
+            return None
+        context, auth_error = authenticate_header(authorization)
+        if auth_error is not None:
+            status_code, payload = auth_error
+            return JSONResponse(status_code=status_code, content=payload)
+        if context is None:
+            return None
+        if context["kind"] == "pat":
+            target = await _pat_target_project(request, context)
+            pat_project = context.get("project_id")
+            if _known_project_id(target) and pat_project and target != pat_project:
+                return JSONResponse(
+                    status_code=403,
+                    content=error_payload("authz.project_denied", "PAT 仅限其绑定项目使用，跨项目一律拒绝"),
+                )
+            if pat_project and target == pat_project:
+                record = project_store.get_project(pat_project)
+                if record is not None and record.get("status") == "disabled":
+                    return JSONResponse(
+                        status_code=409,
+                        content=error_payload("project.disabled", "PAT 绑定项目已停用，读写一律拒绝"),
+                    )
+            return JSONResponse(
+                status_code=403,
+                content=error_payload("authz.pat_scope_denied", "PAT 不可用于任务读端点"),
+            )
+        if context["kind"] == "sigt":
+            request.state.auth = context
+        return None
+
+    def _known_project_id(value):
+        if not value:
+            return False
+        if configured_repo and value == project_metadata(configured_repo):
+            return True
+        record = project_store.get_project(value)
+        return record is not None
+
     @app.middleware("http")
     async def require_credentials(request, call_next):
         path = request.url.path
@@ -591,11 +775,15 @@ def create_app(default_repo=None):
             if request.method == "GET" and path.startswith("/api/tasks/") and "workspace" not in request.query_params:
                 rest = path[len("/api/tasks/"):]
                 parts = tuple(part for part in rest.split("/") if part)
-                if parts[1:] in PUBLIC_TASK_READ_SUFFIXES and parts[0]:
-                    return await call_next(request)
-                # REQ-2 证据下载：匿名对清单外/穿越名的请求须得到 404/4xx 而非 401，
-                # 授权下沉到端点内（先解析名与路径，再验凭据；有效名匿名才 401）。
-                if len(parts) >= 2 and parts[1] == "evidence":
+                public_read = bool(parts[1:] in PUBLIC_TASK_READ_SUFFIXES and parts[0])
+                evidence_read = bool(len(parts) >= 2 and parts[1] == "evidence")
+                if public_read or evidence_read:
+                    # T6 读面匿名语义保持；但携带凭据的请求仍按凭据族裁决
+                    # （AC-09：A-PAT 读 B 任务读面 → 403 authz.project_denied；
+                    # A sigt 打 B 任务读面 → 端点守卫 403 task_mismatch）。
+                    guarded = await _guard_public_read(request)
+                    if guarded is not None:
+                        return guarded
                     return await call_next(request)
             context, auth_error = authenticate_header(request.headers.get("Authorization"))
             if auth_error is not None:
@@ -607,14 +795,37 @@ def create_app(default_repo=None):
                 cookie_token = request.cookies.get(authn.SESSION_COOKIE)
                 cookie_session = authn.find_session(cookie_token) if cookie_token else None
                 if cookie_session:
-                    context = {"kind": "user", "actor": cookie_session["user"], "task": None, "via": "cookie"}
+                    context = {
+                        "kind": "user",
+                        "actor": cookie_session["user"],
+                        "task": None,
+                        "via": "cookie",
+                        "active_project": cookie_session.get("active_project"),
+                    }
             if context is None:
                 return JSONResponse(
                     status_code=401,
                     content=error_payload("auth.required", "valid credentials are required for this endpoint"),
                 )
             if context["kind"] == "pat":
-                # PAT 接口隔离：confirm/operator 域/sigt 交叉全 403，过期/吊销 401 已在上游拦截。
+                # T17 鉴权顺序钉名：先项目边界（跨项目 → 403 authz.project_denied），
+                # 后操作权限（同项目无该操作权限 → 403 authz.pat_scope_denied）；
+                # 停用项目凭据作用于本项目（读与写）→ 409 project.disabled。
+                # 过期/吊销 401 已在上游拦截。
+                target = await _pat_target_project(request, context)
+                pat_project = context.get("project_id")
+                if _known_project_id(target) and pat_project and target != pat_project:
+                    return JSONResponse(
+                        status_code=403,
+                        content=error_payload("authz.project_denied", "PAT 仅限其绑定项目使用，跨项目一律拒绝"),
+                    )
+                if pat_project and target == pat_project:
+                    record = project_store.get_project(pat_project)
+                    if record is not None and record.get("status") == "disabled":
+                        return JSONResponse(
+                            status_code=409,
+                            content=error_payload("project.disabled", "PAT 绑定项目已停用，读写一律拒绝"),
+                        )
                 if not pat_path_allowed(request.method, path):
                     return JSONResponse(
                         status_code=403,
@@ -622,6 +833,11 @@ def create_app(default_repo=None):
                     )
                 authn.touch_pat(context["token"])
             if context["kind"] == "sigt":
+                if path.startswith("/api/projects"):
+                    return JSONResponse(
+                        status_code=403,
+                        content=error_payload("authz.operator_only", "capability tokens (sigt) cannot use project-facing endpoints"),
+                    )
                 operator_domain, token_task = path_authorization(request.method, path)
                 if operator_domain:
                     return JSONResponse(
@@ -681,12 +897,12 @@ def create_app(default_repo=None):
         return ok(readmodel.project_snapshot(resolve_repo(None)))
 
     @app.get("/api/requirements")
-    def requirements_endpoint(request: Request):
-        return ok({"requirements": readmodel.list_requirements(resolve_repo(None))})
+    def requirements_endpoint(request: Request, repo: str | None = None):
+        return ok({"requirements": readmodel.list_requirements(resolve_repo(repo, session=credentials(request)))})
 
     @app.get("/api/requirements/{requirement_id}")
-    def requirement_detail_endpoint(request: Request, requirement_id: str):
-        detail = readmodel.requirement_detail(resolve_repo(None), requirement_id)
+    def requirement_detail_endpoint(request: Request, requirement_id: str, repo: str | None = None):
+        detail = readmodel.requirement_detail(resolve_repo(repo, session=credentials(request)), requirement_id)
         if detail is None:
             raise PlatformError("requirement.not_found", f"requirement does not exist: {requirement_id}")
         return ok(detail)
@@ -695,8 +911,9 @@ def create_app(default_repo=None):
     # T9 需求起草流：settings 签发面 + PAT 生命周期 + 需求动词 + confirm。
     # ------------------------------------------------------------------
 
-    def _issue_pat(repository, user, label, scope, expires_in):
-        """签发 PAT：平台侧只存散列+元数据，完整令牌仅当次响应回显一次。"""
+    def _issue_pat(project_record, user, label, scope, expires_in):
+        """签发项目级 PAT：平台侧只存散列+元数据（含 project_id），完整令牌仅
+        当次响应回显；pat.issued 六键事件落该凭据所属项目状态仓（单笔提交并 push）。"""
         label = (label or "").strip()
         if not label:
             raise PlatformError("pat.label_required", "label（执行者标签）必填，归属落账用")
@@ -710,16 +927,31 @@ def create_app(default_repo=None):
                 cleaned.append(item)
         if not cleaned:
             raise PlatformError("pat.invalid_scope", "at least one issuable scope must be granted")
-        token = authn.mint_pat(user, cleaned, label, expires_at)
-        record = authn.register_pat(user, label, cleaned, label, expires_in, token)
+        token = authn.mint_pat(user, cleaned, label, expires_at, project_id=project_record["project_id"])
+        record = authn.register_pat(user, label, cleaned, label, expires_in, token, project_id=project_record["project_id"])
+        repository = project_store.ensure_clone(project_record)
+        project_store.fetch_integrate(repository, for_write=True)
         record_pat_event(repository, "pat.issued", user, {
             "pat_id": record["pat_id"],
             "label": record["label"],
             "obo": label,
             "scope": cleaned,
             "expires_at": record["expires_at"],
+            "project_id": project_record["project_id"],
         })
         return record, token
+
+    def _pat_project_for_issue(project_id):
+        """POST /api/pats 项目解析与前置校验（钉名序：project.required →
+        project.not_found → project.disabled）。"""
+        if not str(project_id or "").strip():
+            raise PlatformError("project.required", "project_id 必填：PAT 为项目级凭据")
+        record = project_store.get_project(str(project_id).strip())
+        if record is None:
+            raise NotFoundError("project.not_found", f"project does not exist: {project_id}")
+        if record.get("status") == "disabled":
+            raise PlatformError("project.disabled", f"project {project_id} is disabled; credentials cannot be issued", exit_code=3)
+        return record
 
     def _requirement_attribution(request):
         """需求动词归因：PAT → actor=签发人 / on_behalf_of=执行者标签；本人会话 → 双字段=登录人。"""
@@ -740,7 +972,9 @@ def create_app(default_repo=None):
         session = page_session(request)
         if session is None:
             return RedirectResponse(url="/login", status_code=302)
-        return HTMLResponse(pages.render_settings(session["user"], authn.list_pats(session["user"])))
+        return HTMLResponse(pages.render_settings(
+            session["user"], authn.list_pats(session["user"]), project_store.list_projects(),
+            project_ctx=_page_project_context(session)))
 
     @app.post("/settings/pats")
     async def settings_pats_create(request: Request):
@@ -748,25 +982,33 @@ def create_app(default_repo=None):
         if session is None:
             return RedirectResponse(url="/login", status_code=302)
         form = await request.form()
+        project_record = _pat_project_for_issue(str(form.get("project") or ""))
         record, token = _issue_pat(
-            resolve_repo(None),
+            project_record,
             session["user"],
             str(form.get("label") or ""),
             [str(value) for value in form.getlist("scope")],
             str(form.get("expires_in") or "24h"),
         )
-        return HTMLResponse(pages.render_pat_issued(session["user"], record, token))
+        return HTMLResponse(pages.render_pat_issued(
+            session["user"], record, token, project_ctx=_page_project_context(session)))
 
     @app.post("/api/pats")
-    def pats_issue_endpoint(request: Request, body: PatIssueBody):
+    def pats_issue_endpoint(request: Request, body: PatIssueBody | None = None):
+        # body 可选：conformance/空体探测下 sigt 须先得到 403（鉴权先于字段校验）。
         context = credentials(request)
         if context["kind"] != "user":
             raise AuthorizationError("authz.session_required", "PAT 只能由本人登录签发，凭证不可代签")
-        record, token = _issue_pat(resolve_repo(None), context["actor"], body.label, body.scope, body.expires_in)
+        if body is None:
+            raise PlatformError("request.invalid", "label, scope, expires_in and project_id are required")
+        project_record = _pat_project_for_issue(body.project_id)
+        record, token = _issue_pat(project_record, context["actor"], body.label, body.scope, body.expires_in)
         return ok({
             "pat_id": record["pat_id"],
             "label": record["label"],
+            "obo": record["obo"],
             "scope": record["scope"],
+            "project_id": record["project_id"],
             "expires_at": record["expires_at"],
             "token": token,
         })
@@ -779,12 +1021,23 @@ def create_app(default_repo=None):
         return ok({"pats": authn.list_pats(context["actor"])})
 
     @app.post("/api/pats/{pat_id}/revoke")
-    def pats_revoke_endpoint(request: Request, pat_id: str):
+    def pats_revoke_endpoint(request: Request, pat_id: str, body: PatRevokeBody | None = None):
         context = credentials(request)
         if context["kind"] != "user":
             raise AuthorizationError("authz.session_required", "仅本人可吊销本人 PAT")
         record = authn.revoke_pat(pat_id, context["actor"])
-        record_pat_event(resolve_repo(None), "pat.revoked", context["actor"], {"pat_id": pat_id})
+        project_id = record.get("project_id")
+        if project_id:
+            project_record = project_store.get_project(project_id)
+            if project_record is not None and not project_record.get("builtin"):
+                repository = project_store.ensure_clone(project_record)
+                project_store.fetch_integrate(repository, for_write=True)
+                record_pat_event(repository, "pat.revoked", context["actor"], {
+                    "pat_id": pat_id,
+                    "project_id": project_id,
+                })
+                return ok({"pat_id": pat_id, "status": record["status"]})
+        record_pat_event(resolve_repo(None), "pat.revoked", context["actor"], {"pat_id": pat_id, "project_id": project_id})
         return ok({"pat_id": pat_id, "status": record["status"]})
 
     @app.post("/api/requirements")
@@ -792,7 +1045,8 @@ def create_app(default_repo=None):
         actor, on_behalf_of = _requirement_attribution(request)
         _pat_scope_required(request, "requirement:create")
         return ok(create_requirement(
-            resolve_repo(None), body.requirement_id, body.title, body.body, body.entries, actor, on_behalf_of,
+            resolve_repo(body.repo, for_write=True, session=credentials(request)),
+            body.requirement_id, body.title, body.body, body.entries, actor, on_behalf_of,
             source=body.source))
 
     @app.post("/api/requirements/{requirement_id}")
@@ -800,21 +1054,26 @@ def create_app(default_repo=None):
         actor, on_behalf_of = _requirement_attribution(request)
         _pat_scope_required(request, "requirement:update")
         return ok(update_requirement(
-            resolve_repo(None), requirement_id, body.body, body.entries, actor, on_behalf_of,
+            resolve_repo(body.repo, for_write=True, session=credentials(request)),
+            requirement_id, body.body, body.entries, actor, on_behalf_of,
             source=body.source))
 
     @app.post("/api/requirements/{requirement_id}/submission")
     def requirement_submit_endpoint(request: Request, requirement_id: str, body: ConfirmBody | None = None):
         actor, on_behalf_of = _requirement_attribution(request)
         _pat_scope_required(request, "requirement:submit")
-        return ok(submit_requirement(resolve_repo(None), requirement_id, actor, on_behalf_of))
+        repo = body.repo if body else None
+        return ok(submit_requirement(
+            resolve_repo(repo, for_write=True, session=credentials(request)),
+            requirement_id, actor, on_behalf_of))
 
     @app.post("/api/requirements/{requirement_id}/closeout")
-    def requirement_closeout_endpoint(request: Request, requirement_id: str):
+    def requirement_closeout_endpoint(request: Request, requirement_id: str, repo: str | None = None):
         context = credentials(request)
         if context["kind"] != "user":
             raise AuthorizationError("authz.session_required", "需求收口只认本人交互登录，任何凭证不可代过")
-        return ok(closeout_requirement(resolve_repo(None), requirement_id, context["actor"]))
+        return ok(closeout_requirement(
+            resolve_repo(repo, for_write=True, session=context), requirement_id, context["actor"]))
 
     @app.post("/api/requirements/{requirement_id}/backlog-merge")
     def requirement_backlog_merge_endpoint(request: Request, requirement_id: str, body: MergeBody):
@@ -822,10 +1081,11 @@ def create_app(default_repo=None):
         if context["kind"] != "user":
             raise AuthorizationError("authz.session_required", "backlog 归并只认本人交互登录，任何凭证不可代过")
         return ok(merge_backlog_item(
-            resolve_repo(None), requirement_id, body.backlog_task_id, body.entry_id, context["actor"]))
+            resolve_repo(None, for_write=True, session=context),
+            requirement_id, body.backlog_task_id, body.entry_id, context["actor"]))
 
     @app.post("/api/requirements/{requirement_id}/confirm")
-    async def requirement_confirm_endpoint(request: Request, requirement_id: str):
+    async def requirement_confirm_endpoint(request: Request, requirement_id: str, repo: str | None = None):
         context = credentials(request)
         if context["kind"] != "user":
             raise AuthorizationError("authz.session_required", "confirm 只认本人交互登录，任何凭证不可代过")
@@ -833,7 +1093,8 @@ def create_app(default_repo=None):
         if content_type.startswith("application/x-www-form-urlencoded") or content_type.startswith("multipart/form-data"):
             form = await request.form()
             entries = [str(value) for value in form.getlist("entries")]
-            confirm_requirement(resolve_repo(None), requirement_id, entries, context["actor"])
+            confirm_requirement(
+                resolve_repo(repo, for_write=True, session=context), requirement_id, entries, context["actor"])
             return RedirectResponse(url="/requirements/{}".format(requirement_id), status_code=303)
         try:
             payload = await request.json()
@@ -844,47 +1105,54 @@ def create_app(default_repo=None):
         entries = payload.get("entries") or []
         if not isinstance(entries, list):
             raise PlatformError("request.invalid", "confirm entries must be a list")
-        return ok(confirm_requirement(resolve_repo(None), requirement_id, entries, context["actor"]))
+        return ok(confirm_requirement(
+            resolve_repo(repo, for_write=True, session=context), requirement_id, entries, context["actor"]))
 
     @app.get("/")
     def overview(request: Request):
         session = page_session(request)
         if session is None:
             return RedirectResponse(url="/login", status_code=302)
-        snapshot = readmodel.project_snapshot(resolve_repo(None))
-        return HTMLResponse(pages.render_overview(session["user"], snapshot))
+        snapshot = readmodel.project_snapshot(resolve_repo(None, session=session))
+        return HTMLResponse(pages.render_overview(
+            session["user"], snapshot, project_ctx=_page_project_context(session)))
 
     @app.get("/requirements")
     def requirements_page(request: Request):
         session = page_session(request)
         if session is None:
             return RedirectResponse(url="/login", status_code=302)
-        entries = readmodel.list_requirements(resolve_repo(None))
-        return HTMLResponse(pages.render_requirements(session["user"], entries))
+        entries = readmodel.list_requirements(resolve_repo(None, session=session))
+        return HTMLResponse(pages.render_requirements(
+            session["user"], entries, project_ctx=_page_project_context(session)))
 
     @app.get("/requirements/{requirement_id}")
     def requirement_detail_page(request: Request, requirement_id: str):
         session = page_session(request)
         if session is None:
             return RedirectResponse(url="/login", status_code=302)
-        detail = readmodel.requirement_detail(resolve_repo(None), requirement_id)
+        detail = readmodel.requirement_detail(resolve_repo(None, session=session), requirement_id)
         if detail is None:
             raise PlatformError("requirement.not_found", f"requirement does not exist: {requirement_id}")
-        return HTMLResponse(pages.render_requirement_detail(session["user"], detail))
+        return HTMLResponse(pages.render_requirement_detail(
+            session["user"], detail, project_ctx=_page_project_context(session)))
 
     @app.get("/tasks")
     def tasks_board_page(request: Request):
         session = page_session(request)
         if session is None:
             return RedirectResponse(url="/login", status_code=302)
-        return HTMLResponse(pages.render_board(session["user"], readmodel.task_board(resolve_repo(None))))
+        return HTMLResponse(pages.render_board(
+            session["user"], readmodel.task_board(resolve_repo(None, session=session)),
+            project_ctx=_page_project_context(session)))
 
     @app.get("/tasks/new")
     def task_new_page(request: Request, requirement: str | None = None):
         session = page_session(request)
         if session is None:
             return RedirectResponse(url="/login", status_code=302)
-        return HTMLResponse(pages.render_task_form(session["user"], requirement))
+        return HTMLResponse(pages.render_task_form(
+            session["user"], requirement, project_ctx=_page_project_context(session)))
 
     @app.post("/tasks")
     async def task_create_page(request: Request):
@@ -899,11 +1167,11 @@ def create_app(default_repo=None):
             raise PlatformError("request.invalid", "title and requirement are required and must be non-empty")
         # T9 派生闸门（AC-05）+ T10 条目引用校验（AC-01）：页面表单与 cookie API
         # 同一条校验路径——需求须存在且 confirmed，承载条目编号须命中「判据条目」节。
-        validate_requirement_derive(resolve_repo(None), requirement)
+        validate_requirement_derive(resolve_repo(None, session=session), requirement)
         # 与 POST /api/tasks 同一条创建路径：owner 锁定为登录用户；workspace 由
         # 客户端在任务创建后自行落地（api-remote-ready，REQ-3）。
-        result = init_task(resolve_repo(None), None, title, requirement, session["user"], session["user"],
-                           req_items=req_items)
+        result = init_task(resolve_repo(None, for_write=True, session=session), None, title, requirement,
+                           session["user"], session["user"], req_items=req_items)
         return RedirectResponse(url="/tasks/{}".format(result["task_id"]), status_code=303)
 
     @app.get("/tasks/{task_id}")
@@ -911,15 +1179,149 @@ def create_app(default_repo=None):
         session = page_session(request)
         if session is None:
             return RedirectResponse(url="/login", status_code=302)
-        detail = readmodel.task_detail(resolve_repo(None), task_id)
+        detail = readmodel.task_detail(resolve_repo(None, session=session), task_id)
         if detail is None:
             raise NotFoundError("task.not_found", f"task does not exist: {task_id}")
-        return HTMLResponse(pages.render_task_detail(session["user"], detail))
+        return HTMLResponse(pages.render_task_detail(
+            session["user"], detail, project_ctx=_page_project_context(session)))
 
     @app.get("/guide")
     def guide_page(request: Request):
         # T15/REQ-3/AC-03：接入指南——匿名可读（规范非机密、获取动作经 API）。
         return HTMLResponse(pages.render_guide())
+
+    # ------------------------------------------------------------------
+    # T17 页面面：/projects（注册+列表，FORM-01）、/projects/{id}（详情+
+    # 配置+凭据+停用/启用）、全站顶栏项目切换器（POST .../switch，button-only
+    # 零命名字段表单，303 回来源页；未登录一律跳登录页——首版无只读用户）。
+    # ------------------------------------------------------------------
+
+    def _page_project_context(session):
+        current = None
+        current_id = session.get("active_project")
+        if current_id:
+            current = project_store.get_project(current_id)
+        if current is None and configured_repo:
+            builtin_pid = project_metadata(configured_repo)
+            if builtin_pid:
+                current = project_store.get_project(builtin_pid)
+        return {"current": current, "projects": project_store.list_projects()}
+
+    def _project_recent_events(record, limit=5):
+        repository = configured_repo
+        if not record.get("builtin"):
+            try:
+                repository = project_store.ensure_clone(record)
+                project_store.fetch_integrate(repository, for_write=False)
+            except PlatformError:
+                repository = None
+        if repository is None:
+            return []
+        return readmodel.recent_events(repository, limit=limit)
+
+    @app.get("/projects")
+    def projects_page(request: Request):
+        session = page_session(request)
+        if session is None:
+            return RedirectResponse(url="/login", status_code=302)
+        return HTMLResponse(pages.render_projects(
+            session["user"], project_store.list_projects(), error=None, project_ctx=_page_project_context(session)))
+
+    @app.post("/projects")
+    async def projects_register_page(request: Request):
+        session = page_session(request)
+        if session is None:
+            return RedirectResponse(url="/login", status_code=302)
+        form = await request.form()
+        name = str(form.get("name") or "")
+        state_repo = str(form.get("state_repo") or "")
+        code_repo = str(form.get("code_repo") or "")
+        state_credential = str(form.get("state_credential") or "")
+        code_credential = str(form.get("code_credential") or "")
+        credentials = {}
+        if state_credential:
+            credentials["state"] = {"method": "https_pat", "secret": state_credential}
+        if code_credential:
+            credentials["code"] = {"method": "https_pat", "secret": code_credential}
+        try:
+            platform_repo = os.environ.get("SIGNET_PLATFORM_REPO")
+            builtin_pid = project_metadata(configured_repo) if configured_repo else None
+            record = project_store.register_project(
+                name, state_repo, code_repo, credentials or None,
+                session["user"], platform_repo, configured_repo, builtin_pid)
+        except PlatformError as error:
+            return HTMLResponse(pages.render_projects(
+                session["user"], project_store.list_projects(), error=error.message,
+                project_ctx=_page_project_context(session)))
+        return RedirectResponse(url="/projects/{}".format(record["project_id"]), status_code=303)
+
+    @app.get("/projects/{project_id}")
+    def project_detail_page(request: Request, project_id: str):
+        session = page_session(request)
+        if session is None:
+            return RedirectResponse(url="/login", status_code=302)
+        record = _require_project_record(project_id)
+        return HTMLResponse(pages.render_project_detail(
+            session["user"], record,
+            project_store.project_credentials_view(project_id),
+            _project_recent_events(record),
+            notice=None,
+            project_ctx=_page_project_context(session),
+        ))
+
+    @app.post("/projects/{project_id}/configure")
+    async def project_configure_page(request: Request, project_id: str):
+        session = page_session(request)
+        if session is None:
+            return RedirectResponse(url="/login", status_code=302)
+        form = await request.form()
+        name = str(form.get("name") or "").strip()
+        if name:
+            try:
+                project_store.update_project(project_id, name=name)
+                _platform_event("project.configured", session["user"], {
+                    "project_id": project_id,
+                    "fields": ["name"],
+                })
+            except PlatformError:
+                pass
+        return RedirectResponse(url="/projects/{}".format(project_id), status_code=303)
+
+    @app.post("/projects/{project_id}/disable")
+    def project_disable_page(request: Request, project_id: str):
+        session = page_session(request)
+        if session is None:
+            return RedirectResponse(url="/login", status_code=302)
+        record = _require_mutable_project(project_id)
+        if record.get("status") != "disabled":
+            project_store.update_project(project_id, status="disabled")
+            _platform_event("project.disabled", session["user"], {"project_id": project_id})
+        return RedirectResponse(url="/projects", status_code=303)
+
+    @app.post("/projects/{project_id}/enable")
+    def project_enable_page(request: Request, project_id: str):
+        session = page_session(request)
+        if session is None:
+            return RedirectResponse(url="/login", status_code=302)
+        record = _require_mutable_project(project_id)
+        if record.get("status") == "disabled":
+            project_store.update_project(project_id, status="active")
+            _platform_event("project.enabled", session["user"], {"project_id": project_id})
+        return RedirectResponse(url="/projects", status_code=303)
+
+    @app.post("/projects/{project_id}/switch")
+    def project_switch_page(request: Request, project_id: str):
+        session = page_session(request)
+        if session is None:
+            return RedirectResponse(url="/login", status_code=302)
+        _require_project_record(project_id)
+        token = request.cookies.get(authn.SESSION_COOKIE)
+        authn.set_session_active_project(token, project_id)
+        target = request.headers.get("referer") or "/"
+        if not target.startswith("/"):
+            target = "/"
+        return RedirectResponse(url=target, status_code=303)
+
 
     @app.get("/login")
     def login_page(request: Request):
@@ -948,22 +1350,52 @@ def create_app(default_repo=None):
         return response
 
     @app.get("/api/tasks")
-    def task_board_endpoint(request: Request):
-        return ok({"tasks": readmodel.task_board(resolve_repo(None))})
+    def task_board_endpoint(request: Request, repo: str | None = None):
+        return ok({"tasks": readmodel.task_board(resolve_repo(repo, session=credentials(request)))})
+
+    def _sigt_task_guard(request, task_id):
+        """公开读端点（详情/状态匿名可读，T6 语义）的端点级 sigt 绑定校验：
+        中间件对 GET 详情/状态放行，sigt 跨任务在这里拒（403 authz.task_mismatch）。"""
+        context = getattr(request.state, "auth", None)
+        if isinstance(context, dict) and context.get("kind") == "sigt" and context.get("task") != task_id:
+            raise AuthorizationError(
+                "authz.task_mismatch",
+                f"token is bound to task {context.get('task')}, not {task_id}",
+            )
+
+    def _verify_sigt_project(context, repository):
+        """T17 钉名：sigt 的 repo 字段（项目 project_id 或兼容仓路径）必须与任务
+        所属项目一致，不符即拒 403 authz.project_denied（零副作用）。"""
+        if not isinstance(context, dict) or context.get("kind") != "sigt":
+            return
+        sigt_repo = context.get("repo")
+        if sigt_repo is None:
+            return
+        expected = {sigt_repo_field(repository), str(Path(repository).resolve())}
+        if sigt_repo not in expected:
+            raise AuthorizationError(
+                "authz.project_denied",
+                f"sigt 绑定项目 {sigt_repo} 与任务所属项目不符",
+                details={"sigt_project": sigt_repo, "task_project": sigt_repo_field(repository)},
+            )
 
     @app.get("/api/tasks/{task_id}")
-    def task_detail_endpoint(request: Request, task_id: str):
-        detail = readmodel.task_detail(resolve_repo(None), task_id)
+    def task_detail_endpoint(request: Request, task_id: str, repo: str | None = None):
+        _sigt_task_guard(request, task_id)
+        repository = task_repository(request, task_id, repo)
+        detail = readmodel.task_detail(repository, task_id)
         if detail is None:
             raise NotFoundError("task.not_found", f"task does not exist: {task_id}")
         return ok(detail)
 
     @app.get("/api/tasks/{task_id}/status")
-    def status_endpoint(request: Request, task_id: str, workspace: str | None = Query(default=None)):
+    def status_endpoint(request: Request, task_id: str, workspace: str | None = Query(default=None), repo: str | None = None):
         if workspace:
             workspace_task_id(workspace, task_id)
             return ok({**status(workspace), "task_id": task_id})
-        metadata = load_authoritative_task(resolve_repo(None), task_id)
+        _sigt_task_guard(request, task_id)
+        repository = task_repository(request, task_id, repo)
+        metadata = load_authoritative_task(repository, task_id)
         return ok({"task": metadata, "inbox": [], "outbox_collab": [], "authoritative": True, "task_id": task_id})
 
     @app.get("/api/tasks/{task_id}/package")
@@ -972,8 +1404,7 @@ def create_app(default_repo=None):
         # 为 conformance 提供探针安全的 GET 通路；匿名 401，三凭据族 200）。
         # api-remote-ready：repo 仅接受逻辑 id 或省略（AC-01/02 同口径）——
         # CLI 投影拉取携带 --repo 时经查询参数透传，未绑定服务维持本地仓语义。
-        repository = resolve_repo(repo)
-        load_authoritative_task(repository, task_id)
+        repository = task_repository(request, task_id, repo)
         metadata, body = read_task(task_path(repository, task_id))
         return ok(build_task_package(repository, metadata, body))
 
@@ -984,7 +1415,7 @@ def create_app(default_repo=None):
         repo: str | None = None,
         role: str = Header(default="operator", alias="X-Signet-Role"),
     ):
-        repository = resolve_repo(repo)
+        repository = task_repository(request, task_id, repo)
         if role == "operator":
             settle_expired_vetoes(repository)
         return ok({"events": task_log(repository, task_id)})
@@ -997,17 +1428,22 @@ def create_app(default_repo=None):
             return ok(claim(workspace, request_actor(request), request_actor(request)))
         context = credentials(request)
         on_behalf_of = body.on_behalf_of if body else None
+        repo_value = body.repo if body else None
         if context["kind"] == "sigt":
             # sigt 幂等接管：同 actor 续期（lease.renewed）/ 无租约重 claim，
             # 响应携带完整任务包（AC-01/AC-03）。AC-16：on_behalf_of 记录执行者（CLI 本人登录身份）。
-            return ok(claim_with_sigt(resolve_repo(None), task_id, context["actor"], on_behalf_of))
-        return ok(claim_authoritative(resolve_repo(None), task_id, request_actor(request)))
+            # T17：任务按注册表全局定位；sigt 项目绑定不符即拒（403 authz.project_denied）。
+            repository = task_repository(request, task_id, repo_value, for_write=True)
+            return ok(claim_with_sigt(
+                repository, task_id, context["actor"], on_behalf_of, sigt_repo=context.get("repo")))
+        repository = task_repository(request, task_id, repo_value, for_write=True)
+        return ok(claim_authoritative(repository, task_id, request_actor(request)))
 
     @app.get("/api/tasks/{task_id}/assets/{name:path}")
     def task_asset_endpoint(request: Request, task_id: str, name: str, repo: str | None = None):
         # api-remote-ready：repo 查询参数可选（AC-01/02 同口径），CLI 投影落地
-        # 携带 --repo 时透传；省略落服务端绑定存储。
-        repository = resolve_repo(repo)
+        # 携带 --repo 时透传；省略落服务端绑定存储/活动项目。
+        repository = task_repository(request, task_id, repo)
         metadata = load_authoritative_task(repository, task_id)
         asset_path = resolve_spec_asset(repository, metadata, name)
         return Response(content=asset_path.read_bytes(), media_type="application/octet-stream")
@@ -1096,9 +1532,11 @@ def create_app(default_repo=None):
                     "authz.sigt_required",
                     "submission without a workspace requires a task capability token (sigt)",
                 )
+            repository = task_repository(request, task_id, None, for_write=True)
+            _verify_sigt_project(context, repository)
             if not evidence_paths:
                 evidence_paths = [report_path]
-            return ok(submit_authoritative(resolve_repo(None), task_id, context["actor"], report_path, evidence_paths, on_behalf_of))
+            return ok(submit_authoritative(repository, task_id, context["actor"], report_path, evidence_paths, on_behalf_of))
 
     @app.post("/api/tasks/{task_id}/blocks")
     async def blocks_endpoint(request: Request, task_id: str):
@@ -1120,7 +1558,8 @@ def create_app(default_repo=None):
                     require_workspace_lease(str(workspace), task_id, context["actor"])
                     return ok(block(str(workspace), context["actor"], context["actor"], reason, evidence_paths))
                 evidence_docs = evidence_manifest(evidence_paths) if evidence_paths else []
-                return ok(block_authoritative(resolve_repo(None), task_id, context["actor"], reason, evidence_docs))
+                repository = task_repository(request, task_id, None, for_write=True)
+                return ok(block_authoritative(repository, task_id, context["actor"], reason, evidence_docs))
         try:
             payload = await request.json()
         except Exception:
@@ -1134,7 +1573,8 @@ def create_app(default_repo=None):
         if workspace:
             require_workspace_lease(str(workspace), task_id, context["actor"])
             return ok(block(str(workspace), context["actor"], context["actor"], reason, []))
-        return ok(block_authoritative(resolve_repo(None), task_id, context["actor"], reason, evidence_docs))
+        repository = task_repository(request, task_id, None, for_write=True)
+        return ok(block_authoritative(repository, task_id, context["actor"], reason, evidence_docs))
 
     @app.post("/api/tasks/{task_id}/enhancements")
     def enhancements_endpoint(request: Request, task_id: str, body: EnhancementBody):
@@ -1175,8 +1615,159 @@ def create_app(default_repo=None):
         # api-remote-ready（REQ-3/AC-07）：workspace 参数语义移除——服务端不创建/写
         # client 工作区；客户端在 init-task 成功后经任务包拉取自行落地投影。
         return ok(init_task(
-            resolve_repo(body.repo), None, title, requirement, actor, actor,
+            resolve_repo(body.repo, for_write=True, session=context), None, title, requirement, actor, actor,
             req_items=body.req_items, validate_req_items=session_path))
+
+    # ------------------------------------------------------------------
+    # T17 multi-project-support：项目注册表生命周期面（REQ-1）。
+    # project.* 事件落平台绑定仓（注册表生命周期是平台级账本事件，且停用窗口
+    # 项目远端 HEAD 不得前进——AC-03 钉名零副作用）；凭据族事件落各项目仓（AC-19）。
+    # ------------------------------------------------------------------
+
+    def _platform_event(event_type, actor, payload):
+        """项目注册表生命周期事件：落平台绑定仓（单笔提交，T16 push 语义不变）。"""
+        repository = resolve_repo(None)
+        event = make_event(event_type, None, actor, actor, None, None, payload=payload, entrypoint="operator")
+        events_file = event_path(repository)
+        append_jsonl(events_file, stamp_events(repository, [event]))
+        commit_paths(repository, [events_file.relative_to(repository)], event_type)
+
+    def _require_project_record(project_id):
+        record = project_store.get_project(project_id)
+        if record is None:
+            raise NotFoundError("project.not_found", f"project does not exist: {project_id}")
+        return record
+
+    def _require_mutable_project(project_id):
+        record = _require_project_record(project_id)
+        if record.get("builtin"):
+            raise PlatformError(
+                "project.builtin_protected",
+                "内置项目（平台自身）不可停用、不可改绑、不可删凭据",
+                exit_code=3,
+                details={"project_id": project_id},
+            )
+        return record
+
+    def _apply_git_credential_events(project_id, credentials, actor):
+        """configure 携 credentials upsert：写凭据存储 + git_credential.configured
+        三键事件落该项目状态仓（秘密只写不回显）。"""
+        record = _require_project_record(project_id)
+        repository = project_store.ensure_clone(record)
+        project_store.fetch_integrate(repository, for_write=True)
+        for repo_kind in ("state", "code"):
+            entry = credentials.get(repo_kind)
+            if entry is None:
+                continue
+            project_store.upsert_git_credential(project_id, repo_kind, entry["method"], entry.get("secret"))
+            record_pat_event(repository, "git_credential.configured", actor, {
+                "project_id": project_id,
+                "repo": repo_kind,
+                "method": entry["method"],
+            })
+        project_store.apply_credential_to_clone(repository, record)
+
+    @app.get("/api/projects")
+    def projects_list_endpoint(request: Request):
+        return ok({"projects": project_store.list_projects()})
+
+    @app.post("/api/projects")
+    def projects_register_endpoint(request: Request, body: ProjectRegisterBody | None = None):
+        context = credentials(request)
+        if context["kind"] != "user":
+            raise AuthorizationError("authz.session_required", "项目注册只认本人登录（用户令牌或会话 cookie），任何凭证不可代注册")
+        body = body or ProjectRegisterBody()
+        platform_repo = os.environ.get("SIGNET_PLATFORM_REPO")
+        builtin_pid = project_metadata(configured_repo) if configured_repo else None
+        record = project_store.register_project(
+            body.name, body.state_repo, body.code_repo, body.credentials,
+            context["actor"], platform_repo, configured_repo, builtin_pid,
+        )
+        # project.registered 事件随骨架首笔提交落项目状态仓（见 projects.skeleton_tree）。
+        return ok({"project": record})
+
+    @app.get("/api/projects/{project_id}")
+    def projects_detail_endpoint(request: Request, project_id: str):
+        return ok({"project": _require_project_record(project_id)})
+
+    @app.post("/api/projects/{project_id}/configure")
+    def projects_configure_endpoint(request: Request, project_id: str, body: ProjectConfigureBody | None = None):
+        context = credentials(request)
+        if context["kind"] != "user":
+            raise AuthorizationError("authz.session_required", "项目配置只认本人登录，任何凭证不可代配置")
+        record = _require_mutable_project(project_id)
+        if record.get("status") == "disabled":
+            raise PlatformError("project.disabled", f"project {project_id} is disabled; configure is rejected", exit_code=3)
+        body = body or ProjectConfigureBody()
+        if body.state_repo is not None or body.code_repo is not None:
+            raise PlatformError(
+                "project.repo_immutable",
+                "首版不支持 state_repo/code_repo 改绑：仓库地址一经注册不可变更（零副作用）",
+            )
+        fields = []
+        if body.name is not None and str(body.name).strip() and body.name != record.get("name"):
+            record = project_store.update_project(project_id, name=str(body.name).strip())
+            fields.append("name")
+        supplied_credentials = body.credentials or {}
+        if supplied_credentials:
+            cleaned = project_store.validate_supplied_credentials(supplied_credentials)
+            _apply_git_credential_events(project_id, cleaned, context["actor"])
+            fields.extend(f"credentials.{kind}" for kind in ("state", "code") if kind in cleaned)
+        if fields:
+            _platform_event("project.configured", context["actor"], {
+                "project_id": project_id,
+                "fields": fields,
+            })
+        return ok({"project": _require_project_record(project_id)})
+
+    @app.post("/api/projects/{project_id}/disable")
+    def projects_disable_endpoint(request: Request, project_id: str):
+        context = credentials(request)
+        if context["kind"] != "user":
+            raise AuthorizationError("authz.session_required", "项目停用只认本人登录，任何凭证不可代操作")
+        record = _require_mutable_project(project_id)
+        if record.get("status") != "disabled":
+            record = project_store.update_project(project_id, status="disabled")
+            _platform_event("project.disabled", context["actor"], {"project_id": project_id})
+        return ok({"project": _require_project_record(project_id)})
+
+    @app.post("/api/projects/{project_id}/enable")
+    def projects_enable_endpoint(request: Request, project_id: str):
+        context = credentials(request)
+        if context["kind"] != "user":
+            raise AuthorizationError("authz.session_required", "项目启用只认本人登录，任何凭证不可代操作")
+        record = _require_mutable_project(project_id)
+        if record.get("status") == "disabled":
+            record = project_store.update_project(project_id, status="active")
+            _platform_event("project.enabled", context["actor"], {"project_id": project_id})
+        return ok({"project": _require_project_record(project_id)})
+
+    @app.get("/api/projects/{project_id}/credentials")
+    def projects_credentials_endpoint(request: Request, project_id: str):
+        _require_project_record(project_id)
+        return ok({"credentials": project_store.project_credentials_view(project_id)})
+
+    @app.post("/api/projects/{project_id}/credentials/remove")
+    def projects_credentials_remove_endpoint(request: Request, project_id: str, body: CredentialRemoveBody | None = None):
+        context = credentials(request)
+        if context["kind"] != "user":
+            raise AuthorizationError("authz.session_required", "凭据记录删除只认本人登录，任何凭证不可代操作")
+        record = _require_mutable_project(project_id)
+        repo_kind = (body.repo if body else None) or ""
+        if repo_kind not in ("state", "code"):
+            raise PlatformError("request.invalid", "repo 必须为 state|code")
+        if record.get("status") == "disabled":
+            raise PlatformError("project.disabled", f"project {project_id} is disabled; credential removal is rejected", exit_code=3)
+        removed = project_store.remove_git_credential(project_id, repo_kind)
+        if removed:
+            repository = project_store.ensure_clone(record)
+            project_store.fetch_integrate(repository, for_write=True)
+            record_pat_event(repository, "git_credential.removed", context["actor"], {
+                "project_id": project_id,
+                "repo": repo_kind,
+            })
+            project_store.apply_credential_to_clone(repository, record)
+        return ok({"project_id": project_id, "repo": repo_kind})
 
     @app.post("/api/tasks/{task_id}/freeze")
     def freeze_endpoint(
