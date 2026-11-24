@@ -90,6 +90,7 @@ def propagate_pin_invalidation(repository, pin, actor, reason, source_task_id, c
                 metadata["updated_at"] = utc_now()
                 changed_tasks[task_id] = (metadata, body)
                 events.append(make_event("task.void", task_id, actor, actor, before, "Void", payload={"reason": "specification-invalidated", **context}))
+    return marker
 
 
 def init_repository(repository, actor, name=None, owner=None):
