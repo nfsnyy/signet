@@ -1,17 +1,15 @@
 import json
 import os
 import re
-import shutil
-import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import distribution
-from . import codeflow
-from .authn import mint_sigt
-from .collaboration import collaboration_overview, process_collaboration_sync, validate_report_collaboration
-from . import projects as project_store
-from .domain import (
+from .. import distribution
+from .. import codeflow
+from ..authn import mint_sigt
+from ..collaboration import collaboration_overview, process_collaboration_sync, validate_report_collaboration
+from .. import projects as project_store
+from ..domain import (
     REPORT_SECTIONS,
     SPEC_FILES,
     VOIDABLE_BY_SPEC_INVALIDATION,
@@ -29,15 +27,22 @@ from .domain import (
     spec_path,
     task_path,
     validate_actor_alias,
-    validate_report,
     workspace_agents,
 )
-from .errors import AuthorizationError, NotFoundError, OperationalError, PlatformError
-from .readmodel import parse_requirement_text, pinned_acceptance_card, requirement_coverage
-from .gitrepo import commit_paths, ensure_remote_syncable, ensure_repository, initialize_repository
-from .jsonio import append_jsonl, new_id, read_json, read_jsonl, sha256_file, utc_now, write_json
-from .runner import frozen_contract
-from .taskfile import read_task, write_task
+from ..errors import AuthorizationError, NotFoundError, OperationalError, PlatformError
+from ..readmodel import parse_requirement_text, pinned_acceptance_card, requirement_coverage
+from ..gitrepo import commit_paths, ensure_remote_syncable, ensure_repository, initialize_repository
+from ..jsonio import append_jsonl, new_id, read_json, read_jsonl, sha256_file, utc_now, write_json
+from ..taskfile import read_task, write_task
+from .evidence import (
+    authoritative_evidence_limits,
+    evidence_basenames,
+    evidence_manifest,
+    materialize_submit_evidence,
+    materialize_submit_evidence_bytes,
+)
+from .packages import normalize_req_items, stamp_events, validate_workspace_pin
+from .submissions import read_report
 
 
 def create_trace_review_task(repository, source_metadata, changed_tasks, events):
@@ -108,27 +113,6 @@ def propagate_pin_invalidation(repository, pin, actor, reason, source_task_id, c
     return marker
 
 
-def project_metadata(repository):
-    path = Path(repository) / "project.json"
-    if not path.is_file():
-        return None
-    try:
-        data = read_json(path)
-    except (OSError, json.JSONDecodeError):
-        return None
-    project_id = data.get("project_id")
-    return project_id if isinstance(project_id, str) and project_id else None
-
-
-def stamp_events(repository, events):
-    project_id = project_metadata(repository)
-    if not project_id:
-        return events
-    for event in events:
-        event.setdefault("project_id", project_id)
-    return events
-
-
 def init_repository(repository, actor, name=None, owner=None):
     repository = initialize_repository(repository)
     if (Path(repository) / "project.json").is_file():
@@ -147,11 +131,6 @@ def init_repository(repository, actor, name=None, owner=None):
     append_jsonl(events, initialized)
     commit = commit_paths(repository, ["project.json", "events/events.jsonl"], "Initialize AI development platform")
     return {"repository": str(repository), "project": project, "commit": commit}
-
-
-def normalize_req_items(req_items):
-    """承载条目编号规范化：去空白、去重、升序存放（缺省 []）。"""
-    return sorted({str(item).strip() for item in (req_items or []) if str(item or "").strip()})
 
 
 def validate_req_items_against_requirement(repository, requirement, req_items):
@@ -264,17 +243,6 @@ def verify_frozen_integrity(repository, metadata, actor, entrypoint="operator"):
             )
 
 
-def validate_workspace_pin(workspace, metadata):
-    pin = metadata.get("spec_pin")
-    if not isinstance(pin, dict):
-        raise PlatformError("claim.spec_not_pinned", "task has no spec_pin")
-    for key, filename in SPEC_FILES.items():
-        expected = pin.get(key, {}).get("sha256")
-        path = Path(workspace) / "contract" / filename
-        if not expected or not path.is_file() or sha256_file(path) != expected:
-            raise PlatformError("claim.spec_hash_mismatch", f"frozen file hash mismatch: {filename}")
-
-
 def claim(workspace, actor, on_behalf_of):
     workspace = Path(workspace).resolve()
     metadata, _ = read_task(workspace / "task.md")
@@ -293,252 +261,6 @@ def claim(workspace, actor, on_behalf_of):
         "created_at": utc_now(),
         "base": proposal_base(metadata),
         "parameters": {},
-        "workspace": str(workspace),
-        "local_validation": {"result": "passed", "checked_at": utc_now()},
-    }
-    write_json(workspace / "outbox" / f"{proposal_id}.json", proposal)
-    return {"proposal_id": proposal_id, "task_id": metadata["task_id"], "authoritative": False}
-
-
-def read_report(path):
-    try:
-        with Path(path).open("r", encoding="utf-8") as handle:
-            return json.load(handle)
-    except json.JSONDecodeError as error:
-        raise PlatformError("submit.invalid_report", f"report is not valid JSON: {path}") from error
-
-
-DEFAULT_EVIDENCE_SIZE_LIMIT = 1048576
-DEFAULT_EVIDENCE_TOTAL_LIMIT = 10485760
-
-
-def load_evidence_limits(environment):
-    """REQ-4：上限值读 contract environment 声明（evidence_size_limit_bytes /
-    evidence_total_limit_bytes），缺省或非正整数时回落平台默认值。"""
-    env = environment or {}
-    size_limit = env.get("evidence_size_limit_bytes")
-    total_limit = env.get("evidence_total_limit_bytes")
-    if not isinstance(size_limit, int) or isinstance(size_limit, bool) or size_limit <= 0:
-        size_limit = DEFAULT_EVIDENCE_SIZE_LIMIT
-    if not isinstance(total_limit, int) or isinstance(total_limit, bool) or total_limit <= 0:
-        total_limit = DEFAULT_EVIDENCE_TOTAL_LIMIT
-    return size_limit, total_limit
-
-
-def workspace_evidence_limits(workspace):
-    """提案通道：取工作区 contract/contract.json environment 声明（与 pin 同源）。"""
-    contract_file = Path(workspace) / "contract" / "contract.json"
-    environment = {}
-    if contract_file.is_file():
-        try:
-            document = read_json(contract_file)
-            if isinstance(document, dict):
-                environment = document.get("environment") or {}
-        except (OSError, json.JSONDecodeError):
-            environment = {}
-    return load_evidence_limits(environment)
-
-
-def authoritative_evidence_limits(repository, metadata):
-    """直回流通道：取冻结规格 environment 声明；未钉扎/损坏时回落默认值。"""
-    try:
-        _directory, contract, _mapping = frozen_contract(repository, metadata)
-        environment = contract.get("environment") or {}
-    except Exception:
-        environment = {}
-    return load_evidence_limits(environment)
-
-
-def evidence_manifest(evidence_files, limits=None):
-    manifest = []
-    staged = []
-    for value in evidence_files:
-        path = Path(value).resolve()
-        if not path.is_file():
-            raise PlatformError("submit.evidence_missing", f"evidence file does not exist: {path}")
-        size = path.stat().st_size
-        if size <= 0:
-            raise PlatformError("submit.evidence_empty", f"evidence file is empty: {path}")
-        staged.append((path, size))
-    if limits is not None:
-        size_limit, total_limit = limits
-        total = sum(size for _path, size in staged)
-        if total > total_limit:
-            raise PlatformError(
-                "submit.evidence_total_exceeded",
-                f"本次提交证据总量 {total} 字节，超出单任务证据总量上限 {total_limit} 字节，请裁剪证据内容后重新提交",
-            )
-        for path, size in staged:
-            if size > size_limit:
-                raise PlatformError(
-                    "submit.evidence_too_large",
-                    f"证据文件 {path.name} 大小 {size} 字节，超出单证据上限 {size_limit} 字节，请裁剪证据内容后重新提交",
-                )
-    for path, size in staged:
-        manifest.append({"path": str(path), "sha256": sha256_file(path), "size": size})
-    return manifest
-
-
-def unique_evidence_name(name, taken):
-    """REQ-1 重名短后缀：stem-2.ext、stem-3.ext…（taken 为已占用名集合）。"""
-    if name not in taken:
-        return name
-    stem = Path(name).stem
-    suffix = Path(name).suffix
-    counter = 2
-    while f"{stem}-{counter}{suffix}" in taken:
-        counter += 1
-    return f"{stem}-{counter}{suffix}"
-
-
-def materialize_submit_evidence(repository, task_id, evidence_items):
-    """REQ-1：证据字节落盘 tasks/{task_id}/evidence/（原文件名；同任务重名自动加短后缀，
-    多份内容各自保留、引用互不覆盖）；返回 (仓内相对路径列表, 以仓内相对路径重写的清单)。
-    事件 payload 与报告引用一律改为 tasks/{task_id}/evidence/<name> + sha256 + size。"""
-    evidence_directory = task_path(repository, task_id).parent / "evidence"
-    evidence_directory.mkdir(parents=True, exist_ok=True)
-    taken = {entry.name for entry in evidence_directory.iterdir()}
-    relative_paths = []
-    rewritten = []
-    for item in evidence_items:
-        source = Path(str(item.get("path") or ""))
-        name = unique_evidence_name(source.name or "evidence", taken)
-        taken.add(name)
-        target = evidence_directory / name
-        shutil.copyfile(source, target)
-        relative = target.relative_to(Path(repository)).as_posix()
-        relative_paths.append(relative)
-        rewritten.append({"path": relative, "sha256": sha256_file(target), "size": target.stat().st_size})
-    return relative_paths, rewritten
-
-
-def materialize_submit_evidence_bytes(repository, task_id, evidence_items, bytes_by_name):
-    """AC-08（api-remote-ready）：sync 上传通道的证据落盘——字节随 multipart 上传
-    （按文件名匹配提案引用），服务端不按 client 路径读证据；返回 (仓内相对路径
-    列表, 以仓内相对路径重写的清单)，语义与 materialize_submit_evidence 一致。"""
-    evidence_directory = task_path(repository, task_id).parent / "evidence"
-    evidence_directory.mkdir(parents=True, exist_ok=True)
-    taken = {entry.name for entry in evidence_directory.iterdir()}
-    relative_paths = []
-    rewritten = []
-    for item in evidence_items:
-        name = Path(str(item.get("path") or "evidence")).name or "evidence"
-        content = bytes_by_name[name]
-        name = unique_evidence_name(name, taken)
-        taken.add(name)
-        target = evidence_directory / name
-        target.write_bytes(content)
-        relative = target.relative_to(Path(repository)).as_posix()
-        relative_paths.append(relative)
-        rewritten.append({"path": relative, "sha256": sha256_file(target), "size": target.stat().st_size})
-    return relative_paths, rewritten
-
-
-def evidence_basenames(evidence_items):
-    return [Path(str(item.get("path") or "evidence")).name or "evidence" for item in evidence_items]
-
-
-def resolve_task_evidence(repository, task_id, name):
-    """REQ-2：按名定位本任务 evidence 目录内文件；穿越防护与资产端点同构
-    （绝对路径、..、目录逃逸一律拒绝；不存在 404）。只解析与读取，不创建目录。"""
-    decoded = urllib.parse.unquote(str(name or ""))
-    relative = Path(decoded)
-    if not decoded.strip() or decoded.startswith(("\\", "/")) or relative.is_absolute() \
-            or ".." in relative.parts or re.match(r"^[A-Za-z]:", decoded):
-        raise PlatformError("task.evidence_invalid", f"invalid evidence name: {name}")
-    evidence_directory = task_path(repository, task_id).parent / "evidence"
-    root = evidence_directory.resolve()
-    path = (root / relative).resolve()
-    if path != root and root not in path.parents:
-        raise PlatformError("task.evidence_invalid", f"evidence escapes the task evidence directory: {name}")
-    if not path.is_file():
-        raise NotFoundError("task.evidence_not_found", f"evidence does not exist: {name}")
-    return path
-
-
-def submit(workspace, actor, on_behalf_of, report_file, evidence_files):
-    workspace = Path(workspace).resolve()
-    metadata, _ = read_task(workspace / "task.md")
-    if metadata.get("state") != "In Progress":
-        raise PlatformError("submit.invalid_state", "only an In Progress task can be submitted", details={"state": metadata.get("state")})
-    lease = metadata.get("lease") or {}
-    if not lease_is_active(lease):
-        raise PlatformError("submit.lease_expired", "task lease is not active")
-    if lease.get("claimed_by") != actor:
-        raise PlatformError("submit.lease_owner_mismatch", "only the lease holder can submit this task")
-    validate_workspace_pin(workspace, metadata)
-    report = read_report(report_file)
-    validate_report(report)
-    evidence = evidence_manifest(evidence_files, limits=workspace_evidence_limits(workspace))
-    proposal_id = new_id("proposal")
-    proposal = {
-        "proposal_id": proposal_id,
-        "task_id": metadata["task_id"],
-        "operation": "submit",
-        "actor": actor,
-        "on_behalf_of": on_behalf_of,
-        "created_at": utc_now(),
-        "base": proposal_base(metadata),
-        "parameters": {"report": report, "evidence": evidence},
-        "workspace": str(workspace),
-        "local_validation": {"result": "passed", "checked_at": utc_now()},
-    }
-    write_json(workspace / "outbox" / f"{proposal_id}.json", proposal)
-    return {"proposal_id": proposal_id, "task_id": metadata["task_id"], "authoritative": False}
-
-
-def validate_active_lease(metadata, actor, operation):
-    lease = metadata.get("lease") or {}
-    if not lease_is_active(lease):
-        raise PlatformError(f"{operation}.lease_expired", "task lease is not active")
-    if lease.get("claimed_by") != actor:
-        raise PlatformError(f"{operation}.lease_owner_mismatch", "only the lease holder can perform this operation")
-
-
-def block(workspace, actor, on_behalf_of, reason, evidence_files):
-    workspace = Path(workspace).resolve()
-    metadata, _ = read_task(workspace / "task.md")
-    if metadata.get("state") != "In Progress":
-        raise PlatformError("block.invalid_state", "only an In Progress task can be blocked", details={"state": metadata.get("state")})
-    validate_active_lease(metadata, actor, "block")
-    if not reason or not reason.strip():
-        raise PlatformError("block.reason_required", "block reason is required")
-    evidence = evidence_manifest(evidence_files)
-    proposal_id = new_id("proposal")
-    proposal = {
-        "proposal_id": proposal_id,
-        "task_id": metadata["task_id"],
-        "operation": "block",
-        "actor": actor,
-        "on_behalf_of": on_behalf_of,
-        "created_at": utc_now(),
-        "base": proposal_base(metadata),
-        "parameters": {"reason": reason, "evidence": evidence},
-        "workspace": str(workspace),
-        "local_validation": {"result": "passed", "checked_at": utc_now()},
-    }
-    write_json(workspace / "outbox" / f"{proposal_id}.json", proposal)
-    return {"proposal_id": proposal_id, "task_id": metadata["task_id"], "authoritative": False}
-
-
-def enhancement(workspace, actor, on_behalf_of, title, details):
-    workspace = Path(workspace).resolve()
-    metadata, _ = read_task(workspace / "task.md")
-    if metadata.get("state") != "In Progress":
-        raise PlatformError("enhancement.invalid_state", "only an In Progress task can record an enhancement", details={"state": metadata.get("state")})
-    validate_active_lease(metadata, actor, "enhancement")
-    if not title or not title.strip() or not details or not details.strip():
-        raise PlatformError("enhancement.details_required", "title and details are required")
-    proposal_id = new_id("proposal")
-    proposal = {
-        "proposal_id": proposal_id,
-        "task_id": metadata["task_id"],
-        "operation": "enhancement",
-        "actor": actor,
-        "on_behalf_of": on_behalf_of,
-        "created_at": utc_now(),
-        "base": proposal_base(metadata),
-        "parameters": {"title": title, "details": details},
         "workspace": str(workspace),
         "local_validation": {"result": "passed", "checked_at": utc_now()},
     }
