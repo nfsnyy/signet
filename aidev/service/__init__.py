@@ -10,19 +10,14 @@ from ._core import (
     _synchronize_core,
     block_authoritative,
     build_task_package,
-    claim,
-    claim_authoritative,
-    claim_with_sigt,
     collect_expired_leases,
     create_trace_review_task,
     init_repository,
     init_task,
-    last_claim_delegate,
     propagate_pin_invalidation,
     record_pat_event,
     requirement_body,
     resolve_spec_asset,
-    sigt_repo_field,
     spec_asset_manifest,
     spec_version_directory,
     status,
@@ -35,6 +30,13 @@ from ._core import (
     validate_req_items_against_requirement,
     validate_uploaded_proposals,
     verify_frozen_integrity,
+)
+from .claims import (
+    claim,
+    claim_authoritative,
+    claim_with_sigt,
+    last_claim_delegate,
+    sigt_repo_field,
 )
 from .evidence import (
     DEFAULT_EVIDENCE_SIZE_LIMIT,
