@@ -1,9 +1,21 @@
 from fastapi import Request
-from fastapi.responses import Response
+from fastapi.openapi.docs import (
+    get_redoc_html,
+    get_swagger_ui_html,
+    get_swagger_ui_oauth2_redirect_html,
+)
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from .. import authn, distribution
 from .authnz import ok, perform_login
 from .models import LoginBody
+
+# FastAPI 默认文档路由的钉名路径（基线行为等价重实现为模块级处理器，
+# 消除 FastAPI.setup 闭包形态；路径/响应与默认实现逐字一致）。
+OPENAPI_URL = "/openapi.json"
+DOCS_URL = "/docs"
+DOCS_OAUTH2_REDIRECT_URL = "/docs/oauth2-redirect"
+REDOC_URL = "/redoc"
 
 
 def register(app):
@@ -11,6 +23,10 @@ def register(app):
     app.get("/api/skill")(skill_endpoint)
     app.get("/api/norms/{name:path}")(norm_endpoint)
     app.post("/api/login")(api_login)
+    app.get(OPENAPI_URL, include_in_schema=False)(openapi_json_endpoint)
+    app.get(DOCS_URL, include_in_schema=False)(swagger_docs_endpoint)
+    app.get(DOCS_OAUTH2_REDIRECT_URL, include_in_schema=False)(swagger_oauth2_redirect_endpoint)
+    app.get(REDOC_URL, include_in_schema=False)(redoc_endpoint)
 
 
 def health():
@@ -46,3 +62,39 @@ def api_login(response: Response, body: LoginBody):
     token = perform_login(body.user, body.password)
     response.set_cookie(authn.SESSION_COOKIE, token, httponly=True, samesite="lax", path="/")
     return ok({"token": token, "user": body.user})
+
+
+async def openapi_json_endpoint(request: Request) -> JSONResponse:
+    root_path = request.scope.get("root_path", "").rstrip("/")
+    schema = request.app.openapi()
+    if root_path and request.app.root_path_in_servers:
+        server_urls = {s.get("url") for s in schema.get("servers", [])}
+        if root_path not in server_urls:
+            schema = dict(schema)
+            schema["servers"] = [{"url": root_path}] + schema.get("servers", [])
+    return JSONResponse(schema)
+
+
+async def swagger_docs_endpoint(request: Request) -> HTMLResponse:
+    root_path = request.scope.get("root_path", "").rstrip("/")
+    openapi_url = root_path + OPENAPI_URL
+    oauth2_redirect_url = DOCS_OAUTH2_REDIRECT_URL
+    if oauth2_redirect_url:
+        oauth2_redirect_url = root_path + oauth2_redirect_url
+    return get_swagger_ui_html(
+        openapi_url=openapi_url,
+        title=f"{request.app.title} - Swagger UI",
+        oauth2_redirect_url=oauth2_redirect_url,
+        init_oauth=request.app.swagger_ui_init_oauth,
+        swagger_ui_parameters=request.app.swagger_ui_parameters,
+    )
+
+
+async def swagger_oauth2_redirect_endpoint(request: Request) -> HTMLResponse:
+    return get_swagger_ui_oauth2_redirect_html()
+
+
+async def redoc_endpoint(request: Request) -> HTMLResponse:
+    root_path = request.scope.get("root_path", "").rstrip("/")
+    openapi_url = root_path + OPENAPI_URL
+    return get_redoc_html(openapi_url=openapi_url, title=f"{request.app.title} - ReDoc")
