@@ -1,5 +1,3 @@
-import hashlib
-import html
 import json
 import os
 import re
@@ -11,7 +9,6 @@ from fastapi import FastAPI, File, Form, Header, Query, Request, Response, Uploa
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from .. import authn, distribution, readmodel
@@ -54,468 +51,49 @@ from ..service import (
     update_requirement,
     validate_requirement_derive,
 )
-from . import pages
 from ..specs import freeze_task, refreeze_task
 from ..taskfile import read_task
 from ..vetoes import decide_veto, list_vetoes, propose_veto, settle_expired_vetoes
-
-ACTOR_FIELDS = ("actor", "on_behalf_of", "h1_actor", "h2_actor", "verifier", "confirmed_by")
-PUBLIC_PATHS = ("/api/health", "/api/login", "/api/skill", "/api/norms", "/guide")
-# T15（AC-09）：公开面仅增 /api/skill、/api/norms 前缀与页面 /guide，其余端点匿名行为不变。
-PUBLIC_PATH_PREFIXES = ("/api/norms",)
-# T6 CRLF 用例固化的读面语义：任务详情与状态端点匿名可读（本机信任模型内），
-# 事件/写面仍需凭据；/api/tasks 列表与其余子路径保持守卫。
-PUBLIC_TASK_READ_SUFFIXES = {(), ("status",)}
-OPERATOR_EXACT_PATHS = {
-    ("POST", "/api/repositories"),
-    ("POST", "/api/tasks"),
-    ("POST", "/api/sync"),
-    ("POST", "/api/vetoes"),
-    ("GET", "/api/inbox"),
-}
-OPERATOR_TASK_SUFFIXES = ("/freeze", "/refreeze", "/verify", "/reject", "/close", "/ship", "/void", "/adjudication")
-
-
-def _is_public_path(path):
-    """T15 公开面判定：PUBLIC_PATHS 精确命中，或 PUBLIC_PATH_PREFIXES 前缀命中（/api/norms/*）。"""
-    if path in PUBLIC_PATHS:
-        return True
-    return any(path.startswith(prefix + "/") for prefix in PUBLIC_PATH_PREFIXES)
-
-
-def path_authorization(method, path):
-    """返回 (operator_domain, task_id)：operator_domain 为 True 表示该端点只接受用户令牌。"""
-    if path.startswith("/api/tasks/"):
-        rest = path[len("/api/tasks/"):]
-        task_id, separator, suffix = rest.partition("/")
-        if not separator or not task_id:
-            return False, None
-        if method == "POST" and ("/" + suffix) in OPERATOR_TASK_SUFFIXES:
-            return True, task_id
-        return False, task_id
-    return (method, path) in OPERATOR_EXACT_PATHS, None
-
-LOGIN_PAGE = """<!doctype html>
-<html lang="zh-CN">
-<head><meta charset="utf-8"><title>signet 登录</title>
-<link rel="stylesheet" href="/static/style.css"></head>
-<body>
-<div class="topbar"><span class="brand">signet</span>
-<nav><a href="/">概况</a><a href="/tasks">任务</a><a href="/requirements">需求</a><a href="/projects">项目</a><a href="/guide">接入指南</a></nav>
-<span class="user">未登录</span></div>
-<div class="page" style="display:flex;justify-content:center;padding-top:80px;">
-  <form method="post" action="/login" class="card">
-    <h1 style="text-align:center;">signet 平台登录</h1>
-    <p class="muted">账号由管理员开通，无自助注册；登录后自动进入概况页。</p>
-    <label>用户：<input name="user" required autofocus></label>
-    <label>口令：<input name="password" type="password" required></label>
-    <button class="btn" type="submit">登 录</button>
-    <p class="hint">提示：登录凭据由 operator 开通；会话通过 HttpOnly Cookie 维持。</p>
-  </form>
-</div>
-</body>
-</html>
-"""
-
-_LOGIN_SHELL = """<!doctype html>
-<html lang="zh-CN">
-<head><meta charset="utf-8"><title>{title}</title>
-<link rel="stylesheet" href="/static/style.css"></head>
-<body>
-<div class="topbar"><span class="brand">signet</span>
-<nav><a href="/">概况</a><a href="/tasks">任务</a><a href="/requirements">需求</a><a href="/projects">项目</a><a href="/guide">接入指南</a></nav>
-<span class="user">未登录</span></div>
-<div class="page" style="display:flex;justify-content:center;padding-top:80px;">
-  <div class="card" style="max-width:520px;border:1px solid #e5e7eb;border-radius:10px;padding:20px;">
-    <h1 style="text-align:center;">{heading}</h1>
-    <p class="muted">{message}</p>
-    <p style="text-align:center;"><a href="/login">返回登录页</a></p>
-  </div>
-</div>
-</body>
-</html>
-"""
-
-
-def login_shell_page(title, heading, message):
-    """登录周边页（失败提示等）：与登录页同一居中卡片版式，同样引用样式。"""
-    return _LOGIN_SHELL.format(
-        title=title, heading=heading,
-        message=html.escape(str(message)),
-    )
-
-
-def check_actor_aliases(document):
-    for field in ACTOR_FIELDS:
-        value = document.get(field)
-        if value is not None:
-            validate_actor_alias(value)
-
-
-def ok(result):
-    return {"ok": True, "result": result}
-
-
-def error_payload(code, message, details=None):
-    return {"ok": False, "error": {"code": code, "message": message, "details": details or {}}}
-
-
-class ActorValidatingModel(BaseModel):
-    @model_validator(mode="after")
-    def _check_actor_aliases(self):
-        check_actor_aliases(self.model_dump())
-        return self
-
-
-class ClaimBody(ActorValidatingModel):
-    workspace: str | None = None
-    repo: str | None = None
-    actor: str | None = None
-    on_behalf_of: str | None = None
-
-
-class ProjectRegisterBody(ActorValidatingModel):
-    name: str | None = None
-    state_repo: str | None = None
-    code_repo: str | None = None
-    credentials: dict | None = None
-    actor: str | None = None
-
-
-class ProjectConfigureBody(ActorValidatingModel):
-    name: str | None = None
-    credentials: dict | None = None
-    state_repo: str | None = None
-    code_repo: str | None = None
-    actor: str | None = None
-
-
-class CredentialRemoveBody(ActorValidatingModel):
-    repo: str | None = None
-    actor: str | None = None
-
-
-class PatRevokeBody(ActorValidatingModel):
-    """POST /api/pats/{pat_id}/revoke 的可选 JSON 体（空体合法）。"""
-
-    actor: str | None = None
-
-
-class LoginBody(BaseModel):
-    user: str
-    password: str
-
-
-class EnhancementBody(ActorValidatingModel):
-    workspace: str
-    actor: str | None = None
-    on_behalf_of: str | None = None
-    title: str
-    details: str
-
-
-class CollabSendBody(ActorValidatingModel):
-    workspace: str
-    actor: str | None = None
-    on_behalf_of: str | None = None
-    summary: str
-    type: str | None = None
-    message_type: str | None = None
-    to_task: str | None = None
-    target_task: str | None = None
-    details: str | None = None
-    body: str | None = None
-
-
-class CollabAnswerBody(ActorValidatingModel):
-    workspace: str
-    actor: str | None = None
-    on_behalf_of: str | None = None
-    action: str
-    note: str | None = None
-
-
-class RepositoryBody(ActorValidatingModel):
-    repo: str | None = None
-    actor: str | None = None
-    name: str | None = None
-    owner: str | None = None
-
-
-class InitTaskBody(ActorValidatingModel):
-    repo: str | None = None
-    workspace: str | None = None
-    title: str
-    requirement: str
-    owner: str | None = None
-    actor: str | None = None
-    req_items: list | None = None
-
-
-class RejectBody(ActorValidatingModel):
-    category: str
-    reason: str
-    actor: str | None = None
-    repo: str | None = None
-    workspace: str | None = None
-    push: bool = False
-
-
-class CloseBody(ActorValidatingModel):
-    decision: str
-    actor: str | None = None
-    repo: str | None = None
-    reason: str | None = None
-    push: bool = False
-    ship: bool = False
-    ship_commit: str | None = None
-    ship_fingerprint: str | None = None
-
-
-class ShipBody(ActorValidatingModel):
-    repo: str | None = None
-    commit_hash: str
-    workspace_fingerprint: str | None = None
-    push: bool = False
-
-
-class VoidBody(ActorValidatingModel):
-    reason: str
-    actor: str | None = None
-    repo: str | None = None
-    push: bool = False
-
-
-class AdjudicateBody(ActorValidatingModel):
-    category: str
-    reason: str
-    actor: str | None = None
-    repo: str | None = None
-    workspace: str | None = None
-    push: bool = False
-
-
-class PatIssueBody(BaseModel):
-    label: str
-    scope: list
-    expires_in: str
-    project_id: str | None = None
-
-
-class RequirementCreateBody(BaseModel):
-    requirement_id: str
-    title: str
-    body: str | None = None
-    entries: list = []
-    source: str | None = None
-    repo: str | None = None
-
-
-class RequirementUpdateBody(BaseModel):
-    body: str | None = None
-    entries: list = []
-    source: str | None = None
-    repo: str | None = None
-
-
-class MergeBody(BaseModel):
-    backlog_task_id: str
-    entry_id: str
-
-
-class ConfirmBody(BaseModel):
-    entries: list = []
-    repo: str | None = None
-
-
-def save_upload(upload, directory, fallback_name):
-    if upload is None:
-        return None
-    filename = Path(upload.filename or fallback_name).name or fallback_name
-    target = Path(directory) / filename
-    target.write_bytes(upload.file.read())
-    return str(target)
-
-
-def parse_asset_manifest(manifest):
-    """AC-05（api-remote-ready）：asset_manifest 目标形态——[{"path","sha256"}]
-    对象列表；旧纯字符串列表或条目缺键一律 c3.invalid_fixture；路径越界
-    c3.invalid_asset_path。返回 [(path, sha256), ...]。"""
-    try:
-        entries = json.loads(manifest or "[]")
-    except json.JSONDecodeError:
-        raise PlatformError("c3.invalid_fixture", "asset manifest is not valid JSON")
-    if not isinstance(entries, list):
-        raise PlatformError("c3.invalid_fixture", "asset manifest must be a list")
-    parsed = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            raise PlatformError("c3.invalid_fixture", "each asset manifest entry must be an object with path and sha256")
-        relative = entry.get("path")
-        digest = entry.get("sha256")
-        if not isinstance(relative, str) or not relative.strip() or not isinstance(digest, str) or len(digest) != 64:
-            raise PlatformError("c3.invalid_fixture", "each asset manifest entry must declare path and a 64-hex sha256")
-        relative_path = Path(relative)
-        if relative_path.is_absolute() or ".." in relative_path.parts:
-            raise PlatformError("c3.invalid_asset_path", f"asset escapes the spec directory: {relative}")
-        parsed.append((relative_path.as_posix(), digest))
-    return parsed
-
-
-def _contract_asset_declarations(contract_path):
-    """宽容解析上传的 contract.json 取 assets 声明；解析失败返回 None——
-    契约合法性由 freeze_task 的 c2.invalid_contract 统一裁决。"""
-    try:
-        document = json.loads(Path(contract_path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(document, dict):
-        return None
-    assets = document.get("assets")
-    return assets if isinstance(assets, dict) else {}
-
-
-def materialize_assets(uploads, manifest, temporary, contract_path=None):
-    """AC-04/AC-05：资产内容上传——逐件校验 sha256：manifest 摘要 vs 上传字节、
-    contract 声明 vs 上传字节，任一不符 → c3.content_hash_mismatch 整次拒绝；
-    通过后写入请求级临时目录。"""
-    entries = parse_asset_manifest(manifest)
-    declared = _contract_asset_declarations(contract_path) if contract_path else {}
-    uploads = uploads or []
-    if len(uploads) != len(entries):
-        raise PlatformError("c3.invalid_fixture", "uploaded assets do not match the contract asset manifest")
-    for (relative, digest), upload in zip(entries, uploads):
-        content = upload.file.read()
-        actual = hashlib.sha256(content).hexdigest()
-        if actual != digest:
-            raise PlatformError("c3.content_hash_mismatch", f"asset content hash mismatch: {relative}")
-        declared_digest = declared.get(relative)
-        if declared_digest is not None and declared_digest != actual:
-            raise PlatformError(
-                "c3.content_hash_mismatch",
-                f"declared asset hash does not match the uploaded content: {relative}",
-            )
-        target = Path(temporary) / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
-
-
-def verify_upload_digests(card_path, contract_path, mapping_path, card_sha256, contract_sha256, mapping_sha256):
-    """AC-05：三件套随件摘要校验——任一摘要值与上传字节不符 →
-    c3.content_hash_mismatch 整次拒绝（零副作用：不写规格目录/不落事件）。"""
-    expected = {
-        "card_sha256": (card_path, card_sha256),
-        "contract_sha256": (contract_path, contract_sha256),
-        "mapping_sha256": (mapping_path, mapping_sha256),
-    }
-    for field, (path, digest) in expected.items():
-        if not digest or not path:
-            raise PlatformError("request.invalid", f"{field} is required with the uploaded specification files")
-        actual = hashlib.sha256(Path(path).read_bytes()).hexdigest()
-        if actual != digest:
-            raise PlatformError(
-                "c3.content_hash_mismatch",
-                f"{field} does not match the uploaded content",
-                details={"field": field, "expected": digest, "actual": actual},
-            )
-
-
-def authenticate_header(authorization):
-    """凭据解析：Bearer 会话 / Bearer PAT / sigt。
-
-    返回 (context, error)：error 为 (status_code, payload)（PAT 过期/吊销的
-    专属 401）或 None。Bearer 值带 pat- 前缀时按 PAT 校验（签名 → 过期 →
-    吊销），与 sigt 同构的能力令牌面。context 附令牌 repo/项目绑定字段
-    （T17 项目边界裁决）与会话 active_project。
-    """
-    if not authorization:
-        return None, None
-    scheme, _, value = authorization.partition(" ")
-    scheme = scheme.strip().lower()
-    value = value.strip()
-    if scheme == "bearer" and value:
-        if value.startswith(authn.PAT_PREFIX):
-            payload = authn.verify_pat(value)
-            if payload is None:
-                return None, (401, error_payload("auth.required", "PAT signature is invalid"))
-            if authn.pat_is_expired(payload):
-                return None, (401, error_payload("auth.pat_expired", "PAT has expired"))
-            record = authn.find_pat_by_token(value)
-            if record is not None and record.get("status") == "revoked":
-                return None, (401, error_payload("auth.pat_revoked", "PAT has been revoked"))
-            context = {
-                "kind": "pat",
-                "actor": payload["user"],
-                "obo": payload.get("obo") or payload["user"],
-                "scope": list(payload.get("scope") or []),
-                "token": value,
-                "project_id": payload.get("project_id"),
-                "via": "bearer",
-            }
-            return context, None
-        session = authn.find_session(value)
-        if session:
-            return {
-                "kind": "user",
-                "actor": session["user"],
-                "task": None,
-                "via": "bearer",
-                "active_project": session.get("active_project"),
-            }, None
-        payload = authn.verify_sigt(value)
-        if payload is not None:
-            # Bearer 形态的能力令牌：sigt 经 Bearer 传输同样识别（与 sigt scheme 同构），
-            # 供任务绑定类读端点按 sigt 任务范围做授权分流。
-            return {"kind": "sigt", "actor": payload["actor"], "task": payload["task"], "repo": payload.get("repo"), "via": "sigt"}, None
-        return None, None
-    if scheme == "sigt" and value:
-        payload = authn.verify_sigt(value)
-        if payload is not None:
-            return {"kind": "sigt", "actor": payload["actor"], "task": payload["task"], "repo": payload.get("repo"), "via": "sigt"}, None
-        return None, None
-    return None, None
-
-
-def pat_path_allowed(method, path):
-    """PAT 接口隔离（AC-02）：仅需求起草三动词端点可达。
-
-    POST /api/requirements（create）、POST /api/requirements/{id}（update）、
-    POST /api/requirements/{id}/submission（submit）；confirm 与其余一律 403。
-    """
-    if method != "POST":
-        return False
-    if path == "/api/requirements":
-        return True
-    if not path.startswith("/api/requirements/"):
-        return False
-    parts = [part for part in path[len("/api/requirements/"):].split("/") if part]
-    return len(parts) == 1 or (len(parts) == 2 and parts[1] == "submission")
-
-
-def credentials(request):
-    return request.state.auth
-
-
-def load_authoritative_task(repository, task_id):
-    path = task_path(repository, task_id)
-    if not path.is_file():
-        raise PlatformError("task.not_found", f"task does not exist: {task_id}")
-    return read_task(path)[0]
-
-
-def perform_login(user, password):
-    if authn.login_throttled(user):
-        raise PlatformError(
-            "auth.rate_limited",
-            "too many consecutive failed logins; the account is temporarily throttled",
-            exit_code=5,
-            details={"user": user},
-        )
-    if not authn.authenticate(user, password):
-        authn.note_login_failure(user)
-        raise PlatformError("auth.invalid_credentials", "unknown user or wrong password", exit_code=6)
-    authn.note_login_success(user)
-    return authn.create_session(user)
+from . import pages
+from .authnz import (
+    LOGIN_PAGE,
+    PUBLIC_TASK_READ_SUFFIXES,
+    _is_public_path,
+    authenticate_header,
+    credentials,
+    error_payload,
+    load_authoritative_task,
+    login_shell_page,
+    ok,
+    path_authorization,
+    pat_path_allowed,
+    perform_login,
+)
+from .models import (
+    AdjudicateBody,
+    ClaimBody,
+    CloseBody,
+    CollabAnswerBody,
+    CollabSendBody,
+    ConfirmBody,
+    CredentialRemoveBody,
+    EnhancementBody,
+    InitTaskBody,
+    LoginBody,
+    MergeBody,
+    PatIssueBody,
+    PatRevokeBody,
+    ProjectConfigureBody,
+    ProjectRegisterBody,
+    RejectBody,
+    RepositoryBody,
+    RequirementCreateBody,
+    RequirementUpdateBody,
+    ShipBody,
+    VoidBody,
+    check_actor_aliases,
+)
+from .uploads import materialize_assets, save_upload, verify_upload_digests
 
 
 def create_app(default_repo=None):
