@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import distribution
+from . import codeflow
 from .authn import mint_sigt
 from .collaboration import collaboration_overview, process_collaboration_sync, validate_report_collaboration
 from . import projects as project_store
@@ -715,10 +716,15 @@ def _synchronize_core(repository, proposals, evidence_lookup, actor, push, works
                         source = Path(str(item.get("path") or ""))
                         if not source.is_file():
                             raise PlatformError("submit.evidence_missing", f"evidence file no longer exists: {source}")
+                code_context = codeflow.code_task_context(repository, metadata)
+                code_validator = None
+                if code_context:
+                    code_validator = codeflow.submit_code_validator(code_context[0], proposal["task_id"])
                 accepted_event, outcome = apply_submit(
                     proposal,
                     metadata,
                     collaboration_validator=lambda task_id, report: validate_report_collaboration(repository, task_id, report),
+                    code_validator=code_validator,
                 )
                 if accepted_event is not None:
                     if bytes_by_name is not None:
@@ -1100,6 +1106,10 @@ def submit_authoritative(repository, task_id, actor, report_file, evidence_files
                 [{"item": "orchestration-fixture", "reason": skipped}] if isinstance(skipped, str) and skipped.strip() else []
             )
     evidence = evidence_manifest(evidence_files, limits=authoritative_evidence_limits(repository, metadata))
+    code_context = codeflow.code_task_context(repository, metadata)
+    code_validator = None
+    if code_context:
+        code_validator = codeflow.submit_code_validator(code_context[0], task_id)
     proposal = {
         "proposal_id": new_id("proposal"),
         "task_id": task_id,
@@ -1116,6 +1126,7 @@ def submit_authoritative(repository, task_id, actor, report_file, evidence_files
         proposal,
         metadata,
         collaboration_validator=lambda task_id_, report_: validate_report_collaboration(repository, task_id_, report_),
+        code_validator=code_validator,
     )
     if accepted_event is None:
         _rejected_event, result = outcome

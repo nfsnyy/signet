@@ -1478,10 +1478,13 @@ def create_app(default_repo=None):
         return None
 
     @app.get("/api/tasks/{task_id}/evidence/{name:path}")
-    def task_evidence_endpoint(request: Request, task_id: str, name: str):
+    def task_evidence_endpoint(request: Request, task_id: str, name: str, repo: str | None = None):
         # REQ-2：登录用户 Bearer/cookie 可读任意任务证据（200）；本任务 sigt 200、他任务 sigt 403；
         # 匿名对有效名 401；清单外 404；穿越 4xx 且不读仓外文件。名与路径解析先于授权。
-        repository = resolve_repo(None)
+        # AC-09 真实走查缺陷修复：证据下载与其它任务端点同构支持可选 repo 查询参数
+        # （省略落绑定存储/活动项目并按注册表全局定位，显式 repo 仅限该项目内），
+        # 不再经 resolve_repo(None) 钉死绑定存储导致非内置项目任务 400 task.not_found。
+        repository = task_repository(request, task_id, repo)
         load_authoritative_task(repository, task_id)
         evidence_path = resolve_task_evidence(repository, task_id, name)
         auth_failure = evidence_endpoint_auth(request, task_id)
@@ -1927,6 +1930,7 @@ def create_app(default_repo=None):
                 confirmed_by = form.get("confirmed_by")
                 execute = str(form.get("execute") or "").lower() == "true"
                 push = str(form.get("push") or "").lower() == "true"
+                reverify = str(form.get("reverify") or "").lower() == "true"
                 for field, fallback in (
                     ("results", "results.json"),
                     ("manual_results", "manual-results.json"),
@@ -1952,9 +1956,10 @@ def create_app(default_repo=None):
                 confirmed_by = payload.get("confirmed_by")
                 execute = str(payload.get("execute") or "").lower() == "true"
                 push = str(payload.get("push") or "").lower() == "true"
+                reverify = str(payload.get("reverify") or "").lower() == "true"
             else:
                 repo = verifier = confirmed_by = None
-                execute = push = False
+                execute = push = reverify = False
 
             # 异步接线（T16 返场修复）：verify_task 为阻塞调用（git 提交 + 净室子
             # 进程用例会回调本服务），必须经线程池执行——留在事件循环会使净室用例
@@ -1964,7 +1969,7 @@ def create_app(default_repo=None):
                 if not verifier or not confirmed_by:
                     raise PlatformError("request.invalid", "verifier and confirmed_by are required")
                 check_actor_aliases({"verifier": verifier, "confirmed_by": confirmed_by})
-                return verify_task(repository, task_id, verifier, confirmed_by, results_file, execute, manual_results_file, push, review_report_file=review_report_file)
+                return verify_task(repository, task_id, verifier, confirmed_by, results_file, execute, manual_results_file, push, review_report_file=review_report_file, reverify=reverify)
 
             result = await run_in_threadpool(run_verify)
             return ok(result)

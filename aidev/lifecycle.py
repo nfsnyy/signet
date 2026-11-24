@@ -4,6 +4,7 @@ import os
 import time
 from pathlib import Path
 
+from . import codeflow
 from .domain import (
     VOIDABLE_BY_SPEC_INVALIDATION,
     event_path,
@@ -304,21 +305,38 @@ def evaluate_ai_review_report(repository, metadata, review_report_file):
     }
 
 
-def verify_task(repository, task_id, verifier, confirmed_by, results_file=None, execute=False, manual_results_file=None, push=False, review_report_file=None):
+def verify_task(repository, task_id, verifier, confirmed_by, results_file=None, execute=False, manual_results_file=None, push=False, review_report_file=None, reverify=False):
     repository = ensure_repository(repository)
     if (results_file is None) == (execute is False):
         raise PlatformError("verify.invalid_mode", "provide exactly one of results_file or execute")
     lock = lifecycle_lock(repository)
+    code_worktree_env_set = False
     try:
         path = task_path(repository, task_id)
         if not path.is_file():
             raise PlatformError("task.not_found", f"task does not exist: {task_id}")
         metadata, body = read_task(path)
-        if metadata.get("state") != "Implemented":
-            raise PlatformError("verify.invalid_state", "only an Implemented task can be verified", details={"state": metadata.get("state")})
+        state = metadata.get("state")
+        code_context = codeflow.code_task_context(repository, metadata)
+        if state == "Verified":
+            # T18（REQ-6）：仅非内置项目任务可显式 reverify（新基点重跑全部门，
+            # 源 commit 不变）；未携 reverify 不得静默重验。其余状态口径不变。
+            if not (reverify and code_context):
+                raise PlatformError("verify.invalid_state", "only an Implemented task can be verified", exit_code=3, details={"state": state})
+        elif state != "Implemented":
+            raise PlatformError("verify.invalid_state", "only an Implemented task can be verified", exit_code=3, details={"state": state})
         # AC-03（api-remote-ready）：verify --execute 业务前置——重算钉扎三件套
         # 字节对 spec_pin，篡改件不进入净室（c7.spec_tampered + 安全事件）。
         verify_frozen_integrity(repository, metadata, verifier, entrypoint="operator")
+        # T18（REQ-6）：源 pin 对账 → 精确源副本 + 预合并。全部既有门（spec
+        # integrity/机测/角色分离/conformance/ai_review/人工）都在对账之后执行。
+        code_verification = None
+        if code_context:
+            project_id, _record = code_context
+            pinned = codeflow.reconcile_source_pin(metadata, codeflow.latest_submitted_code(task_log(repository, task_id)))
+            code_verification = codeflow.build_code_verification(project_id, task_id, pinned)
+            os.environ["SIGNET_CODE_WORKTREE"] = code_verification["worktree"]
+            code_worktree_env_set = True
         if execute:
             # 净室用例经 HTTP 回调本服务并合法触发 reject/adjudicate/verify 等生命周期
             # 动词（T16 冻结案即如此，且须按其语义响应），用例执行期间不得持有全仓
@@ -370,6 +388,8 @@ def verify_task(repository, task_id, verifier, confirmed_by, results_file=None, 
         initial_payload = {"results": document, "executed": execute, "workspace_fingerprint": recorded_fingerprint}
         if ai_review is not None:
             initial_payload["ai_review"] = ai_review
+        if code_verification is not None:
+            initial_payload["code_verification"] = code_verification
         events = [
             make_event("verification.initial", task_id, verifier, verifier, "Implemented", "Implemented", payload=initial_payload),
             make_event("verification.confirm", task_id, confirmed_by, confirmed_by, "Implemented", "Verified", payload={"confirmed_by": confirmed_by, "workspace_fingerprint": recorded_fingerprint}),
@@ -377,6 +397,8 @@ def verify_task(repository, task_id, verifier, confirmed_by, results_file=None, 
         ]
         return persist(repository, {task_id: (metadata, body)}, events, extra_paths, f"Verify {task_id}", push)
     finally:
+        if code_worktree_env_set:
+            os.environ.pop("SIGNET_CODE_WORKTREE", None)
         lock.unlink(missing_ok=True)
 
 
@@ -416,6 +438,71 @@ def reject_task(repository, task_id, category, reason, actor, workspace=None, pu
         lock.unlink(missing_ok=True)
 
 
+def _close_ship_code_task(repository, task_id, metadata, body, actor, state, project_id, push):
+    """T18（REQ-7）：非内置项目 close --ship 的服务端代码入库。
+
+    复核 Verified + 源 pin + 验收 merge_commit → 对账远端 main → 非强制单 ref
+    push → 同一状态仓提交落 Done/task.closed/task.shipped。重复 close 幂等返回；
+    main 前进 → 409 ship.reverification_required；push 失败 → 409 ship.push_failed
+    （保持 Verified、零 closed/shipped）；账本 push 失败由 commit_paths 回滚本地
+    半态（恢复后重试只补同一笔账本）。
+    """
+    events = task_log(repository, task_id)
+    if state == "Done":
+        shipped = [event for event in events if event.get("event_type") == "task.shipped"]
+        if shipped:
+            payload = shipped[-1].get("payload") or {}
+            return {
+                "task_id": task_id,
+                "shipped": True,
+                "idempotent": True,
+                "commit_hash": payload.get("commit_hash"),
+                "commit": None,
+                "pushed": False,
+            }
+        raise PlatformError("close.invalid_state", "task was closed without ship; project tasks ship only via close --ship", details={"state": state})
+    if state != "Verified":
+        raise PlatformError("close.invalid_state", "project close --ship requires a Verified task", details={"state": state})
+    verification = codeflow.latest_code_verification(events)
+    if not verification:
+        raise PlatformError("close.invalid_state", "no code verification record; run verify before close --ship", details={"state": state})
+    pinned = metadata.get("code_submission") or {}
+    if (
+        pinned.get("code_repo_id") != project_id
+        or pinned.get("branch") != verification.get("branch")
+        or pinned.get("commit_hash") != verification.get("source_commit")
+    ):
+        raise PlatformError(
+            "verify.source_commit_mismatch",
+            "任务元数据 code_submission 与验收记录源 pin 不符",
+            exit_code=3,
+            details={"code_submission": pinned, "code_verification": verification},
+        )
+    target_base = verification["target_base"]
+    merge_commit = verification["merge_commit"]
+    # 代码 push 先于账本落账；账本失败重试时远端已等于 merge_commit → 只补账本。
+    codeflow.close_push_state(project_id, merge_commit, target_base)
+    metadata["state"] = "Done"
+    metadata["updated_at"] = utc_now()
+    shipped_payload = {
+        "project_id": project_id,
+        "code_repo_id": project_id,
+        "branch": verification["branch"],
+        "source_commit": verification["source_commit"],
+        "final_commit": merge_commit,
+        "commit_hash": merge_commit,
+        "via": "server-push",
+    }
+    events_out = [
+        make_event("task.closed", task_id, actor, actor, state, "Done", payload={"decision": "accept"}),
+        make_event("task.shipped", task_id, actor, actor, "Done", "Done", payload=shipped_payload),
+    ]
+    result = persist(repository, {task_id: (metadata, body)}, events_out, [], f"Close {task_id}", push)
+    result["shipped"] = True
+    result["idempotent"] = False
+    return result
+
+
 def close_task(repository, task_id, decision, actor, reason=None, push=False, ship=False, ship_commit=None, ship_fingerprint=None):
     repository = ensure_repository(repository)
     if decision not in {"accept", "reject"}:
@@ -429,6 +516,19 @@ def close_task(repository, task_id, decision, actor, reason=None, push=False, sh
             raise PlatformError("task.not_found", f"task does not exist: {task_id}")
         metadata, body = read_task(path)
         state = metadata.get("state")
+        # T18（REQ-7）：非内置项目 close --ship 由服务端推送已验收 merge_commit，
+        # 不调用 local_git_ship、不 git add -A；不接受外部 ship_commit（消除异 commit
+        # 重入）。内置项目维持原兼容路径。
+        if ship and decision == "accept":
+            code_context = codeflow.code_task_context(repository, metadata)
+            if code_context:
+                project_id, _record = code_context
+                if ship_commit or ship_fingerprint:
+                    raise PlatformError(
+                        "close.ship_input_forbidden",
+                        "project close --ship ships the verified merge_commit; external ship inputs are not accepted",
+                    )
+                return _close_ship_code_task(repository, task_id, metadata, body, actor, state, project_id, push)
         # close --ship 允许从 Implemented 一步关闭（AC-07：编排直通流无独立 verify 站）；
         # 常规 close 仍要求 Verified。
         allowed_states = {"Verified", "Implemented"} if ship else {"Verified"}
@@ -465,8 +565,21 @@ def ship_task(repository, task_id, actor, commit_hash, fingerprint, push=False):
     """Done 任务的 ship 落账（AC-03/AC-04）：指纹比对、同 commit 幂等、异 commit 冲突拒绝。
 
     git add/commit/push 的本机副作用由 CLI 侧执行（AC-05），本函数只做权威事件记录。
+    T18（REQ-7）：非内置项目的入库通道只有 close --ship（服务端推送已验收
+    merge_commit），既有 POST /ship → 409 ship.use_close。
     """
     repository = ensure_repository(repository)
+    from . import projects as project_store
+
+    ship_project_id = project_store.project_id_for_repository(repository)
+    if ship_project_id:
+        ship_record = project_store.get_project(ship_project_id)
+        if ship_record is not None and not ship_record.get("builtin"):
+            raise PlatformError(
+                "ship.use_close",
+                "非内置项目必须经 close --ship 入库（服务端推送已验收 merge_commit），POST /ship 不适用于项目任务",
+                exit_code=3,
+            )
     if not commit_hash or not commit_hash.strip():
         raise PlatformError("ship.invalid_commit", "commit_hash must be a non-empty string")
     commit_hash = commit_hash.strip()

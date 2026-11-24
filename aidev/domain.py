@@ -14,6 +14,7 @@ SPEC_FILES = {
 }
 
 REPORT_SECTIONS = ("implemented", "executed", "not_executed", "deviations", "collaboration_requests")
+REPORT_CODE_FIELDS = ("code_repo_id", "branch", "commit_hash")
 
 WORKSPACE_DIRECTORIES = ("contract", "evidence", "inbox", "outbox", "outbox-collab")
 
@@ -127,10 +128,16 @@ def rejection(proposal, metadata, code, message):
     return event, result
 
 
-def validate_report(report):
+def validate_report(report, allow_code=False):
+    """五段报告校验。非内置项目已钉扎任务经 allow_code 接受第六段 code 对象：
+    形状（恰三键非空字符串）不符 → 400 submit.code_required；其余段校验口径不变。
+    内置项目与未钉扎起草任务维持严格五段（allow_code=False）。"""
     if not isinstance(report, dict):
         raise PlatformError("submit.invalid_report", "report must be a JSON object")
-    if set(report) != set(REPORT_SECTIONS):
+    keys = set(report)
+    if allow_code and "code" in keys:
+        keys = keys - {"code"}
+    if keys != set(REPORT_SECTIONS):
         raise PlatformError("submit.invalid_report", f"report must contain exactly these sections: {list(REPORT_SECTIONS)}")
     if not isinstance(report["implemented"], str) or not report["implemented"].strip():
         raise PlatformError("submit.invalid_report", "implemented must be a non-empty string")
@@ -151,6 +158,15 @@ def validate_report(report):
     for item in report["collaboration_requests"]:
         if not isinstance(item.get("message_id"), str) or not item["message_id"].strip():
             raise PlatformError("submit.invalid_report", "each collaboration_requests item must contain a message_id")
+    if allow_code:
+        if "code" not in report:
+            raise PlatformError("submit.code_required", "report must contain a code object with code_repo_id, branch and commit_hash")
+        code = report["code"]
+        if not isinstance(code, dict):
+            raise PlatformError("submit.code_required", "code must be an object with code_repo_id, branch and commit_hash")
+        for field in REPORT_CODE_FIELDS:
+            if not isinstance(code.get(field), str) or not code[field].strip():
+                raise PlatformError("submit.code_required", f"code.{field} must be a non-empty string")
 
 
 def workspace_agents(metadata):
@@ -201,7 +217,7 @@ def apply_claim(proposal, metadata, allow_draft=False):
     return event, (None, result)
 
 
-def apply_submit(proposal, metadata, collaboration_validator=None):
+def apply_submit(proposal, metadata, collaboration_validator=None, code_validator=None):
     if metadata.get("state") != "In Progress":
         return None, rejection(proposal, metadata, "submit.invalid_state", "authoritative task is not In Progress")
     code, message = base_is_current(proposal, metadata)
@@ -215,7 +231,7 @@ def apply_submit(proposal, metadata, collaboration_validator=None):
     report = proposal.get("parameters", {}).get("report")
     evidence = proposal.get("parameters", {}).get("evidence")
     try:
-        validate_report(report)
+        validate_report(report, allow_code=code_validator is not None)
         if not isinstance(evidence, list) or not evidence:
             raise PlatformError("submit.evidence_empty", "at least one evidence item is required")
         for item in evidence:
@@ -223,6 +239,10 @@ def apply_submit(proposal, metadata, collaboration_validator=None):
                 raise PlatformError("submit.invalid_evidence", "evidence must contain path and sha256")
         if collaboration_validator is not None:
             collaboration_validator(proposal["task_id"], report)
+        # T18（REQ-5）：非内置项目已钉扎任务的代码校验（钉名拒绝码 + 零副作用）。
+        # 校验通过后钩子归一化 report["code"] 并钉入 metadata["code_submission"]。
+        if code_validator is not None:
+            code_validator(report, metadata)
     except PlatformError as error:
         return None, rejection(proposal, metadata, error.code, error.message)
     metadata["lease"] = None

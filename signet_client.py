@@ -498,6 +498,7 @@ def build_request(role, arguments, sigt_payload=None):
             "confirmed_by": arguments.confirmed_by,
             "execute": str(arguments.execute).lower(),
             "push": str(arguments.push).lower(),
+            "reverify": str(getattr(arguments, "reverify", False)).lower(),
         })
         files = []
         if arguments.results:
@@ -809,6 +810,8 @@ def parser_for(role):
         verify.add_argument("--execute", action="store_true")
         verify.add_argument("--manual-results")
         verify.add_argument("--review-report")
+        verify.add_argument("--reverify", action="store_true",
+                            help="已 Verified 项目任务在新 main 基点显式重跑全部验收门（源 commit 不变）")
         verify.add_argument("--verifier", required=True)
         verify.add_argument("--confirmed-by", required=True)
         verify.add_argument("--push", action="store_true")
@@ -991,8 +994,30 @@ def run(role, argv=None):
     if role == "operator" and arguments.command == "ship":
         return run_local_ship(arguments)
     if role == "operator" and arguments.command == "close" and getattr(arguments, "ship", False):
-        # close --ship（AC-07）：先在本机执行 ship 副作用（平台仓由 SIGNET_PLATFORM_REPO
-        # 定位），拿到 commit_hash 后随 close 请求一并落账 task.closed + task.shipped。
+        # close --ship 双通道（T18 REQ-7）：显式 --repo 命中非内置项目时由服务端推送
+        # 已验收 merge_commit（本机零 git 副作用，不调用 local_git_ship）；省略 repo
+        # 或内置项目维持本机兼容路径（AC-07：先跑本机 ship，commit_hash 随 close 落账）。
+        repo = getattr(arguments, "repo", None)
+        if repo:
+            try:
+                project_status, project_payload = perform(
+                    "GET",
+                    resolve_base_url() + f"/api/projects/{urllib.parse.quote(str(repo), safe='')}",
+                    token=resolve_token(),
+                )
+            except ServiceUnavailable as error:
+                return emit_unreachable(error)
+            project = (
+                (project_payload.get("result") or {}).get("project")
+                if isinstance(project_payload, dict)
+                else None
+            )
+            if project_status == 200 and isinstance(project, dict):
+                if not project.get("builtin"):
+                    return dispatch_request(role, arguments, sigt=None, sigt_payload=None)
+            else:
+                # 未知 repo id / 路径形态：本机零副作用，交由服务端按钉名码拒绝。
+                return dispatch_request(role, arguments, sigt=None, sigt_payload=None)
         try:
             ship_result = local_git_ship(arguments.task_id)
         except ClientInputError as error:
