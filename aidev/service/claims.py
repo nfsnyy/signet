@@ -94,6 +94,34 @@ def sigt_repo_field(repository):
     return project_store.project_id_for_repository(repository) or str(Path(repository).resolve())
 
 
+def collect_expired_leases(repository, changed_tasks, new_events):
+    tasks_directory = repository / "tasks"
+    if not tasks_directory.is_dir():
+        return
+    for path in sorted(tasks_directory.glob("*/task.md")):
+        task_id = path.parent.name
+        if task_id in changed_tasks:
+            metadata, body = changed_tasks[task_id]
+        else:
+            metadata, body = read_task(path)
+        lease = metadata.get("lease")
+        if lease and not lease_is_active(lease):
+            metadata["lease"] = None
+            metadata["updated_at"] = utc_now()
+            new_events.append(make_event(
+                "lease.expired",
+                task_id,
+                lease["claimed_by"],
+                metadata["owner"],
+                metadata["state"],
+                metadata["state"],
+                proposal_id=lease.get("proposal_id"),
+                payload={"lease": lease},
+                entrypoint="agent",
+            ))
+            changed_tasks[task_id] = (metadata, body)
+
+
 def last_claim_delegate(repository, task_id):
     """最近一次 task.claimed 的执行者（on_behalf_of 优先，缺省 actor）——sigt 续期判定键。"""
     for event in reversed(read_jsonl(event_path(repository))):

@@ -6,11 +6,8 @@ requirements / claims / sync / packages / ledger），本文件只承担重导�
 """
 
 from ._core import (
-    PROPOSAL_OPERATIONS,
-    _synchronize_core,
     block_authoritative,
     build_task_package,
-    collect_expired_leases,
     create_trace_review_task,
     init_repository,
     init_task,
@@ -22,19 +19,17 @@ from ._core import (
     spec_version_directory,
     status,
     submit_authoritative,
-    synchronize,
-    synchronize_uploaded,
     task_inbox,
     task_log,
     task_materials,
     validate_req_items_against_requirement,
-    validate_uploaded_proposals,
     verify_frozen_integrity,
 )
 from .claims import (
     claim,
     claim_authoritative,
     claim_with_sigt,
+    collect_expired_leases,
     last_claim_delegate,
     sigt_repo_field,
 )
@@ -83,6 +78,13 @@ from .submissions import (
     read_report,
     submit,
     validate_active_lease,
+)
+from .sync import (
+    PROPOSAL_OPERATIONS,
+    _synchronize_core,
+    synchronize,
+    synchronize_uploaded,
+    validate_uploaded_proposals,
 )
 
 __all__ = [
