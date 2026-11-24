@@ -1,30 +1,10 @@
 """aidev.service 公开导入面（T20 模块化后保持唯一入口，纯重导出）。
 
-历史单文件模块按函数群拆分为同级子模块（evidence / submissions /
-requirements / claims / sync / packages / ledger），本文件只承担重导出，
-不定义任何顶层函数或类；全部公开名保持基线名称与签名。
+历史单文件模块按函数群拆分为同级子模块（evidence / packages /
+requirements / submissions / ledger / claims / sync），本文件只承担
+重导出，不定义任何顶层函数或类；全部公开名保持基线名称与签名。
 """
 
-from ._core import (
-    block_authoritative,
-    build_task_package,
-    create_trace_review_task,
-    init_repository,
-    init_task,
-    propagate_pin_invalidation,
-    record_pat_event,
-    requirement_body,
-    resolve_spec_asset,
-    spec_asset_manifest,
-    spec_version_directory,
-    status,
-    submit_authoritative,
-    task_inbox,
-    task_log,
-    task_materials,
-    validate_req_items_against_requirement,
-    verify_frozen_integrity,
-)
 from .claims import (
     claim,
     claim_authoritative,
@@ -46,10 +26,29 @@ from .evidence import (
     unique_evidence_name,
     workspace_evidence_limits,
 )
+from .ledger import (
+    block_authoritative,
+    create_trace_review_task,
+    init_repository,
+    init_task,
+    propagate_pin_invalidation,
+    record_pat_event,
+    status,
+    submit_authoritative,
+    task_log,
+    verify_frozen_integrity,
+)
 from .packages import (
+    build_task_package,
     normalize_req_items,
     project_metadata,
+    requirement_body,
+    resolve_spec_asset,
+    spec_asset_manifest,
+    spec_version_directory,
     stamp_events,
+    task_inbox,
+    task_materials,
     validate_workspace_pin,
 )
 from .requirements import (
@@ -70,6 +69,7 @@ from .requirements import (
     requirement_file_path,
     submit_requirement,
     update_requirement,
+    validate_req_items_against_requirement,
     validate_requirement_derive,
 )
 from .submissions import (

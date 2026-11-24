@@ -8,8 +8,8 @@ from ..errors import AuthorizationError, PlatformError, NotFoundError
 from ..gitrepo import commit_paths, ensure_repository
 from ..jsonio import append_jsonl, new_id, read_jsonl, utc_now, write_json
 from ..taskfile import read_task, write_task
-from ._core import build_task_package, verify_frozen_integrity
-from .packages import stamp_events, validate_workspace_pin
+from .ledger import verify_frozen_integrity
+from .packages import build_task_package, stamp_events, validate_workspace_pin
 
 
 def claim(workspace, actor, on_behalf_of):

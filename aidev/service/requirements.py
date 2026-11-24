@@ -390,3 +390,30 @@ def merge_backlog_item(repository, requirement_id, backlog_task_id, entry_id, ac
     append_jsonl(events_file, stamp_events(repository, [event]))
     commit = commit_paths(repository, [events_file.relative_to(repository)], f"Merge backlog into {requirement_id}")
     return {"requirement_id": requirement_id, "entry_id": entry_id, "backlog_task_id": backlog_task_id, "commit": commit}
+
+
+def validate_req_items_against_requirement(repository, requirement, req_items):
+    """条目引用校验（会话路径，AC-01）：派生闸门之后逐编号命中需求「判据条目」节。
+
+    需求不存在 → requirement.not_found；未确认 → requirement.not_confirmed；
+    未知编号 → requirement.entry_not_found（details 列全部非法编号）。全部
+    在任何落盘动作之前执行，拒绝形态零副作用。
+    """
+    requirement_obj = read_requirement(repository, requirement)
+    if requirement_obj is None:
+        raise NotFoundError("requirement.not_found", f"requirement does not exist: {requirement}")
+    fields, _body, entries = requirement_obj
+    if fields.get("status") != "confirmed":
+        raise PlatformError(
+            "requirement.not_confirmed",
+            f"requirement {requirement} is not confirmed (status={fields.get('status') or '-'})",
+            details={"requirement_id": requirement, "status": fields.get("status")},
+        )
+    known = {item["id"] for item in entries}
+    unknown = [item for item in req_items if item not in known]
+    if unknown:
+        raise PlatformError(
+            "requirement.entry_not_found",
+            f"requirement entries not found: {unknown}",
+            details={"requirement_id": requirement, "unknown": unknown},
+        )
