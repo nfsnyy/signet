@@ -19,7 +19,7 @@ from ..service import init_repository, synchronize_uploaded
 from ..specs import freeze_task, refreeze_task
 from ..vetoes import decide_veto, list_vetoes, propose_veto
 from .authnz import ok
-from .context import operator_repo, request_actor
+from .context import operator_repo, request_actor, resolve_repo
 from .models import (
     AdjudicateBody,
     CloseBody,
@@ -49,7 +49,7 @@ def register(app):
 
 def repositories_endpoint(request: Request, body: RepositoryBody):
     app_ctx = request.app.state.app_ctx
-    return ok(init_repository(operator_repo(app_ctx, body.repo), request_actor(request), body.name, body.owner))
+    return ok(init_repository(resolve_repo(app_ctx, body.repo), request_actor(request), body.name, body.owner))
 
 
 def freeze_endpoint(
