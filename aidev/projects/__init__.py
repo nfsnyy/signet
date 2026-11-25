@@ -68,14 +68,16 @@ from .credentials import (
     validate_credential,
     write_askpass_script,
 )
+from .clones import (
+    ensure_clone,
+    fetch_integrate,
+)
 from ._pending import (
     GETTING_STARTED_BODY,
     HINTS_TEMPLATE,
     SKELETON_DIRS,
     SKELETON_FILES,
     _probe_clone,
-    ensure_clone,
-    fetch_integrate,
     project_credentials_view,
     register_project,
     skeleton_tree,
