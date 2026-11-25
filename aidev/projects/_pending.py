@@ -1,24 +1,5 @@
-"""T17 multi-project-support：项目注册表、服务端克隆、同步与引导骨架（仅标准库）。
-
-存储全部落在服务端数据目录（``~/.signet/``，与 users.json / pats.json 同族，
-不进任何状态仓）：
-
-- ``projects.json``        项目注册表 ``{project_id: record}``；record 恰八键
-  ``{project_id, name, state_repo, code_repo, status, owner, created_at, builtin}``
-  （与冻结 interfaces EP-01/EP-02 的 project 形态逐键一致）。
-- ``git-credentials.json`` 服务端 Git 凭据 ``{project_id: {state|code: {method,
-  secret, updated_at}}}``——秘密只写不回显，任何响应/列表/事件/任务包均不含秘密；
-  远端认证经 GIT_ASKPASS 供给（origin 恒明文，秘密不进 URL/.git/config/进程
-  参数/日志/错误响应），askpass/ 脚本为凭据存储的衍生运行时工件（随凭据刷新）。
-- ``clones/<project_id>/`` 每注册项目一份独立服务端状态仓克隆；克隆根放
-  ``.signet-project`` 标记文件（内容=project_id）——gitrepo.commit_paths 凭该
-  标记对项目克隆写后自动 push，push 失败回滚本地半态（AC-07）。
-
-repo 解析次序（泛化 T16，向后兼容）：① 省略 → 会话活动项目（无则内置项目）；
-② 路径形态 → 400 ``repo.invalid_identifier``（T16 钉名）；③ 逻辑 id 命中内置
-project_id → 服务端绑定存储（T16 语义不动）；④ 命中注册表 → 该项目服务端克隆
-（读前 fetch 整合 / 写前 fetch+冲突裁决）；⑤ 未知逻辑 id → 404
-``repo.not_found``（T16 钉名）。停用项目 → 409 ``project.disabled``。
+"""T21 core-modularization 过渡承载模块（S1-S3 临时）：尚未迁入最终域模块的函数暂存于此，
+随 S2/S3/S4 逐步搬空后删除。函数体与基线 aidev/projects.py 逐字节一致。
 """
 
 import hashlib
@@ -28,29 +9,31 @@ import re
 import shutil
 import subprocess
 import tempfile
-import threading
 from pathlib import Path
 
-from . import authn
-from .domain import make_event
-from .errors import NotFoundError, OperationalError, PlatformError
-from .gitrepo import is_ancestor, run_git
-from .jsonio import append_jsonl, atomic_write_bytes, new_id, read_json, utc_now
+from .. import authn
+from ..domain import make_event
+from ..errors import OperationalError, PlatformError
+from ..gitrepo import is_ancestor, run_git
+from ..jsonio import append_jsonl, new_id, utc_now
 
-REGISTRY_FILE = "projects.json"
-CREDENTIALS_FILE = "git-credentials.json"
-CLONES_DIR_NAME = "clones"
-PROJECT_MARKER = ".signet-project"
-
-PROJECT_RECORD_KEYS = ("project_id", "name", "state_repo", "code_repo", "status", "owner", "created_at", "builtin")
-
-URL_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*://\S+$")
-SCP_LIKE_RE = re.compile(r"^[A-Za-z0-9_.+-]+@[A-Za-z0-9_.-]+:\S+$")
-EMBEDDED_CREDENTIALS_RE = re.compile(r"^[a-z][a-z0-9+.-]*://[^/\s@]+@[^/\s]+")
-PATH_FORM_DRIVE_RE = re.compile(r"^[A-Za-z]:")
-PATH_FORM_SEPARATOR_RE = re.compile(r"[/\\]")
+from .registry import (
+    GIT_IDENTITY,
+    PROJECT_MARKER,
+    _read_project_json,
+    clone_dir,
+    data_dir,
+    load_credentials,
+    put_project,
+    read_project_marker,
+    save_credentials,
+    url_scheme,
+    validate_repo_url,
+    write_project_marker,
+)
 
 GIT_METHODS = ("file", "https_pat", "ssh_agent")
+
 SSH_KEY_MARKERS = (
     "BEGIN OPENSSH PRIVATE KEY",
     "BEGIN RSA PRIVATE KEY",
@@ -60,249 +43,28 @@ SSH_KEY_MARKERS = (
     "BEGIN ENCRYPTED PRIVATE KEY",
 )
 
-GIT_IDENTITY = ("signet-platform", "signet-platform@local.invalid")
-
-_registry_lock = threading.Lock()
-
-
-def data_dir():
-    return authn.data_dir()
-
-
-def registry_path():
-    return data_dir() / REGISTRY_FILE
-
-
-def credentials_path():
-    return data_dir() / CREDENTIALS_FILE
-
-
-def clones_root():
-    return data_dir() / CLONES_DIR_NAME
-
-
-def load_registry():
-    path = registry_path()
-    if not path.is_file():
-        return {}
-    try:
-        document = read_json(path)
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return document if isinstance(document, dict) else {}
-
-
-def save_registry(registry):
-    atomic_write_bytes(registry_path(), (json.dumps(registry, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
-
-
-def load_credentials():
-    path = credentials_path()
-    if not path.is_file():
-        return {}
-    try:
-        document = read_json(path)
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return document if isinstance(document, dict) else {}
-
-
-def save_credentials(document):
-    atomic_write_bytes(credentials_path(), (json.dumps(document, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
-
-
-def get_project(project_id):
-    record = load_registry().get(project_id)
-    return record if isinstance(record, dict) else None
-
-
-def list_projects():
-    return sorted(load_registry().values(), key=lambda item: (str(item.get("created_at") or ""), str(item.get("project_id") or "")))
-
-
-def put_project(record):
-    with _registry_lock:
-        registry = load_registry()
-        registry[record["project_id"]] = record
-        save_registry(registry)
-
-
-def update_project(project_id, **fields):
-    with _registry_lock:
-        registry = load_registry()
-        record = registry.get(project_id)
-        if record is None:
-            raise NotFoundError("project.not_found", f"project does not exist: {project_id}")
-        record.update(fields)
-        save_registry(registry)
-        return record
-
-
 # ---------------------------------------------------------------------------
-# 内置项目（启动自检）
+# 服务端 Git 凭据供给（AC-19 防泄漏：秘密不进 URL/.git/config/进程参数/日志/错误响应）
 # ---------------------------------------------------------------------------
+#
+# 供给方式 = GIT_ASKPASS 环境变量：origin 恒为明文 URL，git 认证时回调 askpass
+# 脚本取用户名/密码（https_pat 语义同嵌入 userinfo——秘密作 username、密码空），
+# 克隆配置、进程参数、错误 details 均不接触秘密；每次远端操作另带
+# ``-c credential.helper=`` 清空全局 helper（防 GCM/store 代为持久化或弹窗，
+# 实测不清空会挂起等待 GUI 凭据框）+ GIT_TERMINAL_PROMPT=0 fail-closed。
+# askpass 脚本是凭据存储的衍生运行时工件（同在服务端数据目录、随凭据增删刷新），
+# 秘密仍只落 ``git-credentials.json`` 与该脚本本身（AC-19 只写落证）。
 
-def _read_project_json(repository):
-    path = Path(repository) / "project.json"
-    if not path.is_file():
-        return None
-    try:
-        document = read_json(path)
-    except (OSError, json.JSONDecodeError):
-        return None
-    return document if isinstance(document, dict) else None
+ASKPASS_DIR_NAME = "askpass"
 
-
-def _origin_url(repository):
-    result = run_git(repository, ["remote", "get-url", "origin"], check=False)
-    if result.returncode == 0 and result.stdout.strip():
-        return result.stdout.strip()
-    return None
-
-
-def builtin_record(bound_repository):
-    """绑定仓登记为内置项目（project.json 的 project_id；缺文件返回 None）。"""
-    document = _read_project_json(bound_repository)
-    if not document or not isinstance(document.get("project_id"), str) or not document["project_id"].strip():
-        return None
-    origin = _origin_url(bound_repository)
-    return {
-        "project_id": document["project_id"],
-        "name": document.get("name") or Path(bound_repository).resolve().name,
-        "state_repo": origin or str(Path(bound_repository).resolve()),
-        "code_repo": os.environ.get("SIGNET_PLATFORM_REPO") or "",
-        "status": "active",
-        "owner": document.get("owner") or "",
-        "created_at": document.get("created_at") or utc_now(),
-        "builtin": True,
-    }
-
-
-def ensure_builtin(bound_repository):
-    """启动自检：注册表生成/核对内置项目记录（幂等；恰一个 builtin）。"""
-    record = builtin_record(bound_repository)
-    if record is None:
-        return None
-    with _registry_lock:
-        registry = load_registry()
-        existing = registry.get(record["project_id"])
-        if existing is not None:
-            merged = dict(existing)
-            merged.update({key: record[key] for key in ("state_repo", "code_repo", "status", "builtin")})
-            merged["name"] = record["name"]
-            registry[record["project_id"]] = merged
-        else:
-            registry[record["project_id"]] = record
-        for project_id, other in registry.items():
-            if project_id != record["project_id"] and other.get("builtin") is True:
-                other["builtin"] = False
-        save_registry(registry)
-        return registry[record["project_id"]]
-
-
-# ---------------------------------------------------------------------------
-# repo URL 校验（注册/配置同口径；顺序钉名见模块 docstring）
-# ---------------------------------------------------------------------------
-
-def normalize_path_value(value):
-    """AC-02 规范化：斜杠统一为反斜杠、去尾斜杠、小写（路径派生比对用）。"""
-    return str(value).replace("/", "\\").rstrip("\\").lower()
-
-
-def is_path_form_repo(value):
-    """T16 同构的本地文件系统路径形态判定。"""
-    if not value:
-        return False
-    if PATH_FORM_DRIVE_RE.match(value):
-        return True
-    if value.startswith(("/", "\\")) or value in (".", ".."):
-        return True
-    return bool(PATH_FORM_SEPARATOR_RE.search(value))
-
-
-def is_url_form(value):
-    return bool(URL_SCHEME_RE.match(value)) or bool(SCP_LIKE_RE.match(value))
-
-
-def url_scheme(value):
-    match = re.match(r"^([a-z][a-z0-9+.-]*)://", value)
-    return match.group(1) if match else None
-
-
-def is_platform_derived(value, platform_repo, bound_repository, builtin_project_id):
-    """AC-02 回退禁四形态：PLATFORM env 值/路径派生（含子路径与尾随斜杠变体）、
-    平台自身 project_id、绑定仓文件系统路径（规范化后相等）。"""
-    candidate = normalize_path_value(value)
-    if platform_repo:
-        platform_norm = normalize_path_value(platform_repo)
-        if candidate == platform_norm or (candidate.startswith(platform_norm + "\\")):
-            return True
-    if builtin_project_id and value.strip() == builtin_project_id:
-        return True
-    if bound_repository:
-        bound_norm = normalize_path_value(Path(bound_repository).resolve())
-        if candidate == bound_norm:
-            return True
-    return False
-
-
-def validate_repo_url(value, kind, platform_repo, bound_repository, builtin_project_id):
-    """单仓 URL 静态校验（钉名错误码）：回退禁 → 形态（URL/scp-like 形态先行，
-    无方案值再按路径形态/非法形态分流）→ 嵌凭据。"""
-    label = "state_repo" if kind == "state" else "code_repo"
-    if is_platform_derived(value, platform_repo, bound_repository, builtin_project_id):
-        raise PlatformError(
-            "project.platform_repo_forbidden",
-            f"{label} 不得绑定平台自身仓、平台自身项目或绑定存储（回退禁止）",
-            details={label: value},
-        )
-    if not is_url_form(value):
-        if is_path_form_repo(value):
-            raise PlatformError(
-                "project.repo_path_forbidden",
-                f"{label} 仅接受远端仓 URL 形态（^[a-z][a-z0-9+.-]*:// 或 scp-like git@host:path），本地文件系统路径一律拒绝",
-                details={label: value},
-            )
-        raise PlatformError(
-            f"project.{kind}_repo_invalid",
-            f"{label} 形态非法：非 URL 非 scp-like",
-            details={label: value},
-        )
-    if EMBEDDED_CREDENTIALS_RE.match(value):
-        raise PlatformError(
-            "project.repo_url_with_credentials",
-            f"{label} 不得嵌入 user:pass@ 形态凭据，请经 credentials 单独供给",
-            details={label: value},
-        )
-    return value
-
-
-def looks_like_ssh_private_key(secret):
-    text = str(secret or "")
-    return any(marker in text for marker in SSH_KEY_MARKERS)
-
-
-def validate_credential(method, secret):
-    """凭据形态校验（钉名）：method 限定 file|https_pat|ssh_agent；ssh_key 或
-    私钥形态秘密一律 400 project.credential_method_unsupported 且响应不回显材料。"""
-    if method not in GIT_METHODS:
-        raise PlatformError(
-            "project.credential_method_unsupported",
-            f"凭据 method 仅支持 {list(GIT_METHODS)}，不支持上传 SSH 私钥",
-            details={"method": method},
-        )
-    if looks_like_ssh_private_key(secret):
-        raise PlatformError(
-            "project.credential_method_unsupported",
-            "秘密形态疑似 SSH 私钥材料，本平台不支持上传 SSH 私钥（仅复用既有 SSH agent）",
-            details={"method": method},
-        )
-
-
-def credential_required_for(url):
-    """非 file:// 仓必须供给凭据（AC-19，先于可达性）。"""
-    return url_scheme(url) != "file"
-
+ASKPASS_TEMPLATE = (
+    "#!/bin/sh\n"
+    "# signet 服务端 git askpass（衍生工件：镜像 git-credentials.json，随凭据刷新/删除）\n"
+    "case \"$1\" in\n"
+    "  *Username*) printf '%s\\n' {secret} ;;\n"
+    "  *Password*) printf '%s\\n' '' ;;\n"
+    "esac\n"
+)
 
 # ---------------------------------------------------------------------------
 # 服务端 Git 凭据（秘密只写不回显）
@@ -312,7 +74,6 @@ def get_git_credential(project_id, repo_kind):
     record = load_credentials().get(project_id) or {}
     value = record.get(repo_kind)
     return value if isinstance(value, dict) else None
-
 
 def upsert_git_credential(project_id, repo_kind, method, secret=None):
     document = load_credentials()
@@ -330,7 +91,6 @@ def upsert_git_credential(project_id, repo_kind, method, secret=None):
     _invalidate_credstate(project_id)
     return entry
 
-
 def remove_git_credential(project_id, repo_kind):
     document = load_credentials()
     per_project = document.get(project_id)
@@ -342,7 +102,6 @@ def remove_git_credential(project_id, repo_kind):
     refresh_askpass_scripts(project_id)
     _invalidate_credstate(project_id)
     return removed
-
 
 def git_credential_metadata(project_id):
     """EP-07 元数据列表片段（无秘密）。"""
@@ -359,44 +118,39 @@ def git_credential_metadata(project_id):
             })
     return entries
 
+def looks_like_ssh_private_key(secret):
+    text = str(secret or "")
+    return any(marker in text for marker in SSH_KEY_MARKERS)
 
-# ---------------------------------------------------------------------------
-# 服务端 Git 凭据供给（AC-19 防泄漏：秘密不进 URL/.git/config/进程参数/日志/错误响应）
-# ---------------------------------------------------------------------------
-#
-# 供给方式 = GIT_ASKPASS 环境变量：origin 恒为明文 URL，git 认证时回调 askpass
-# 脚本取用户名/密码（https_pat 语义同嵌入 userinfo——秘密作 username、密码空），
-# 克隆配置、进程参数、错误 details 均不接触秘密；每次远端操作另带
-# ``-c credential.helper=`` 清空全局 helper（防 GCM/store 代为持久化或弹窗，
-# 实测不清空会挂起等待 GUI 凭据框）+ GIT_TERMINAL_PROMPT=0 fail-closed。
-# askpass 脚本是凭据存储的衍生运行时工件（同在服务端数据目录、随凭据增删刷新），
-# 秘密仍只落 ``git-credentials.json`` 与该脚本本身（AC-19 只写落证）。
+def validate_credential(method, secret):
+    """凭据形态校验（钉名）：method 限定 file|https_pat|ssh_agent；ssh_key 或
+    私钥形态秘密一律 400 project.credential_method_unsupported 且响应不回显材料。"""
+    if method not in GIT_METHODS:
+        raise PlatformError(
+            "project.credential_method_unsupported",
+            f"凭据 method 仅支持 {list(GIT_METHODS)}，不支持上传 SSH 私钥",
+            details={"method": method},
+        )
+    if looks_like_ssh_private_key(secret):
+        raise PlatformError(
+            "project.credential_method_unsupported",
+            "秘密形态疑似 SSH 私钥材料，本平台不支持上传 SSH 私钥（仅复用既有 SSH agent）",
+            details={"method": method},
+        )
 
-ASKPASS_DIR_NAME = "askpass"
-
+def credential_required_for(url):
+    """非 file:// 仓必须供给凭据（AC-19，先于可达性）。"""
+    return url_scheme(url) != "file"
 
 def askpass_dir():
     return data_dir() / ASKPASS_DIR_NAME
-
 
 def askpass_path(project_id, repo_kind):
     safe_pid = re.sub(r"[^A-Za-z0-9_.-]", "_", str(project_id))
     return askpass_dir() / f"{safe_pid}-{repo_kind}.sh"
 
-
 def _shquote(value):
     return "'" + str(value).replace("'", "'\\''") + "'"
-
-
-ASKPASS_TEMPLATE = (
-    "#!/bin/sh\n"
-    "# signet 服务端 git askpass（衍生工件：镜像 git-credentials.json，随凭据刷新/删除）\n"
-    "case \"$1\" in\n"
-    "  *Username*) printf '%s\\n' {secret} ;;\n"
-    "  *Password*) printf '%s\\n' '' ;;\n"
-    "esac\n"
-)
-
 
 def write_askpass_script(project_id, repo_kind, secret):
     script = askpass_path(project_id, repo_kind)
@@ -408,10 +162,8 @@ def write_askpass_script(project_id, repo_kind, secret):
         pass
     return script
 
-
 def remove_askpass_script(project_id, repo_kind):
     askpass_path(project_id, repo_kind).unlink(missing_ok=True)
-
 
 def refresh_askpass_scripts(project_id):
     """凭据存储 → askpass 脚本同步：https_pat 且有秘密者写脚本，其余删除。"""
@@ -423,7 +175,6 @@ def refresh_askpass_scripts(project_id):
             write_askpass_script(project_id, repo_kind, secret)
         else:
             remove_askpass_script(project_id, repo_kind)
-
 
 def git_auth_env(project_id=None, repo_kind="state"):
     """远端 git 操作子进程环境：GIT_ASKPASS（脚本在场时）+ 禁终端/弹窗提示。"""
@@ -437,24 +188,13 @@ def git_auth_env(project_id=None, repo_kind="state"):
     env["GCM_MODAL_PROMPT"] = "false"
     return env
 
-
 def remote_auth_args():
     """清空 credential.helper 的 -c 前缀（防全局 helper 持久化秘密或 GUI 弹窗）。"""
     return ["-c", "credential.helper="]
 
-
-def _git_template_dir():
-    """空模板目录：克隆不复制样板 hooks/description，缩减服务端数据目录体积
-    （验收环境对数据目录做全量字节扫，文件数直接决定扫描耗时）。"""
-    path = data_dir() / "git-empty-template"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
 def _credstate_path(clone):
     """凭据状态标记：存于 .git/ 内部（不进工作树、不被 add -A 提交、不进项目仓）。"""
     return Path(clone) / ".git" / "signet-credstate"
-
 
 def _credstate_expected(record):
     """凭据维护期望指纹（不含秘密：secret 轮换必然刷新 updated_at）。"""
@@ -468,7 +208,6 @@ def _credstate_expected(record):
         json.dumps(fingerprint, sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()
 
-
 def _credstate_current(clone, record):
     path = _credstate_path(clone)
     try:
@@ -476,14 +215,11 @@ def _credstate_current(clone, record):
     except OSError:
         return False
 
-
 def _write_credstate(clone, record):
     _credstate_path(clone).write_text(_credstate_expected(record) + "\n", encoding="utf-8", newline="\n")
 
-
 def _invalidate_credstate(project_id):
     _credstate_path(clone_dir(project_id)).unlink(missing_ok=True)
-
 
 def apply_credential_to_clone(clone, project_record, repo_kind="state"):
     """把凭据应用到服务端克隆（AC-19 防泄漏形态）：origin 恒设明文 URL（同时迁移
@@ -501,27 +237,16 @@ def apply_credential_to_clone(clone, project_record, repo_kind="state"):
     refresh_askpass_scripts(project_record["project_id"])
     _write_credstate(clone, project_record)
 
-
 # ---------------------------------------------------------------------------
 # 服务端克隆与同步（AC-06 读前 fetch / AC-07 写后 push / AC-08 冲突裁决）
 # ---------------------------------------------------------------------------
 
-def clone_dir(project_id):
-    return clones_root() / project_id
-
-
-def read_project_marker(repository):
-    """仓库根 ``.signet-project`` 标记 → project_id（项目克隆识别，非项目仓 None）。"""
-    try:
-        text = (Path(repository) / PROJECT_MARKER).read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    return text or None
-
-
-def write_project_marker(repository, project_id):
-    (Path(repository) / PROJECT_MARKER).write_text(project_id + "\n", encoding="utf-8", newline="\n")
-
+def _git_template_dir():
+    """空模板目录：克隆不复制样板 hooks/description，缩减服务端数据目录体积
+    （验收环境对数据目录做全量字节扫，文件数直接决定扫描耗时）。"""
+    path = data_dir() / "git-empty-template"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 def ensure_clone(project_record):
     """项目服务端克隆在场（缺则建）：origin=明文状态仓远端，认证走 GIT_ASKPASS。
@@ -556,7 +281,6 @@ def ensure_clone(project_record):
         run_git(target, ["checkout", "-b", "main"], check=False)
     return target
 
-
 def _local_and_upstream(clone):
     """一次 for-each-ref 取齐本地 main 与远端 main（省一次 git spawn；
     服务端克隆恒以 main 为工作分支）。"""
@@ -578,7 +302,6 @@ def _local_and_upstream(clone):
             {"stderr": "unborn branch: refs/heads/main"},
         )
     return local, refs.get("refs/remotes/origin/main")
-
 
 def fetch_integrate(clone, for_write=False):
     """读前 fetch 整合 / 写前 fetch+冲突裁决。
@@ -611,41 +334,8 @@ def fetch_integrate(clone, for_write=False):
             details={"local": local, "remote": upstream},
         )
 
-
-def search_task_repo(task_id, skip_repository=None):
-    """省略 repo 的任务端点全局定位：活动/绑定存储未命中时按注册表克隆检索。"""
-    from .domain import task_path
-
-    for record in list_projects():
-        if record.get("builtin"):
-            continue
-        clone = clone_dir(record["project_id"])
-        if not (clone / ".git").exists():
-            continue
-        if skip_repository and Path(clone).resolve() == Path(skip_repository).resolve():
-            continue
-        if task_path(clone, task_id).is_file():
-            return clone
-    return None
-
-
-def project_id_for_repository(repository):
-    """repo 字段（sigt）落点：项目克隆标记 → project_id；否则读仓内 project.json；
-    两者皆无（未初始化临时仓）回落 None（调用方退化为仓路径字符串）。"""
-    marker = read_project_marker(repository)
-    if marker:
-        return marker
-    document = _read_project_json(repository)
-    if document and isinstance(document.get("project_id"), str) and document["project_id"].strip():
-        return document["project_id"]
-    return None
-
-
-# ---------------------------------------------------------------------------
-# 引导骨架（AC-12/AC-13）
-# ---------------------------------------------------------------------------
-
 SKELETON_DIRS = ("requirements", "events", "specs", "tasks")
+
 SKELETON_FILES = ("project.json", "hints.md", "requirements/getting-started.md", "events/events.jsonl",
                   "specs/.gitkeep", "tasks/.gitkeep")
 
@@ -672,6 +362,9 @@ HINTS_TEMPLATE = """# {name} 项目建议区（hints）
   本文件不复制规范全文；项目骨架初始仅含本文件与引导需求。
 """
 
+# ---------------------------------------------------------------------------
+# 引导骨架（AC-12/AC-13）
+# ---------------------------------------------------------------------------
 
 def skeleton_tree(record, actor="signet-platform"):
     """骨架落盘：目录骨架 + project.json + hints.md（反哺节两锚点 + /api/norms 引用）
@@ -721,7 +414,6 @@ def skeleton_tree(record, actor="signet-platform"):
     append_jsonl(clone / "events" / "events.jsonl", [registered])
     return clone
 
-
 # ---------------------------------------------------------------------------
 # 注册（AC-01/AC-02/AC-14/AC-19）
 # ---------------------------------------------------------------------------
@@ -733,7 +425,6 @@ def _check_required(name, state_repo, code_repo):
         raise PlatformError("project.state_repo_required", "必须提供状态仓远端地址（state_repo）")
     if not str(code_repo or "").strip():
         raise PlatformError("project.code_repo_required", "必须提供代码仓远端地址（code_repo）")
-
 
 def validate_supplied_credentials(credentials):
     """注册/配置携 credentials 的形态预检（方法/私钥钉名码；零副作用）。"""
@@ -757,7 +448,6 @@ def validate_supplied_credentials(credentials):
         cleaned[repo_kind] = entry
     return cleaned
 
-
 def _check_credential_supply(state_repo, code_repo, cleaned):
     """凭据供给序（AC-19）：非 file:// 仓未供给凭据 → 400 project.credential_required，
     先于可达性（不得先注册成功再克隆失败）。"""
@@ -768,7 +458,6 @@ def _check_credential_supply(state_repo, code_repo, cleaned):
                 f"{repo_kind}_repo 为非 file:// 远端仓，必须经 credentials.{repo_kind} 供给服务端 Git 凭据",
                 details={"repo": repo_kind},
             )
-
 
 def _probe_clone(state_repo, credential):
     """可达性探针：明文 URL 克隆到临时目录验证可克隆（不存在/非 git →
@@ -796,7 +485,6 @@ def _probe_clone(state_repo, credential):
             details={"stderr": (result.stderr or result.stdout)[-300:]},
         )
     return temporary, target
-
 
 def register_project(name, state_repo, code_repo, credentials, actor, platform_repo, bound_repository, builtin_project_id):
     """注册全流程（校验序：形态 → 回退禁 → 凭据供给 → 可达性；全程零副作用至落库）。
@@ -870,7 +558,6 @@ def register_project(name, state_repo, code_repo, credentials, actor, platform_r
         shutil.rmtree(temporary, ignore_errors=True)
         raise
     return record
-
 
 # ---------------------------------------------------------------------------
 # 项目凭据视图（EP-07 = API PAT 记录 + 服务端 Git 凭据元数据；无秘密无令牌明文）
