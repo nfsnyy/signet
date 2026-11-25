@@ -12,7 +12,7 @@ whenToUse: 当用户要求我接管/执行 operator 职责（建任务、出派�
 ## 0. 平台入口定位
 
 - 本 skill 位于 signet 仓库的 `skills/aidev-operator/` 目录下；平台 CLI 在**仓库根目录**，即从本文件所在目录向上两级：`../../aidev-operator.py`（agent 侧为 `../../aidev-agent.py`）。拿到本 skill 时先确认实际落盘位置再定位 CLI。
-- 全部命令形如 `python <平台路径>\aidev-operator.py <动词> ...`，输出 JSON：成功 `{"ok": true, ...}`；失败读 `error.code` 按 §9 处置，不要绕过。
+- 全部命令形如 `python <平台路径>\aidev-operator.py <动词> ...`，输出 JSON：成功 `{"ok": true, ...}`；失败读 `error.code` 按 `references/troubleshooting.md` 处置，不要绕过。
 - 运行前提：Python 3.11+，只用标准库；平台服务 v1 必须在线。
 
 ## 1. 岗位边界（做 / 不做）
@@ -48,6 +48,12 @@ whenToUse: 当用户要求我接管/执行 operator 职责（建任务、出派�
 
 **实现禁令无例外**：operator 不实现是身份定义，"修复流程/补缺口/顺手改一下"均不构成例外——凡平台代码/测试/规范文档的实质改动只有一条路径：enhancement 登记 → operator 分捡 → 需求/任务流程。分支、worktree、环境搭建在技术上隔离，在流程上同属越界，**授权前一律不碰**。operator 唯一合法的代码触碰=冻结件资产修复（走 §7 对账 + 签署/veto 流程并留痕）。
 
+**§1.2 经验登记触发器（T22 教训：职责在 §1 但无"何时做"，三连坑均靠用户提醒才登记）**：以下任一发生，当场登记状态仓 hints.md，不等用户提醒——
+1. 发生返场/驳回：登记返场根因与指令缺陷（四要素见 §7.9）；
+2. 用户纠正/问责 operator：当场登记并固化，不等到第二次追问；
+3. 首次执行无先例的流程操作：登记操作要点与环境坑；
+4. 每任务 close 摘要时固定回顾一句"本任务有无应登记经验"。
+
 ## 2. 动词清单（operator 面）
 
 | 动词 | 作用 | 关键参数 |
@@ -61,7 +67,7 @@ whenToUse: 当用户要求我接管/执行 operator 职责（建任务、出派�
 | `verify` | 执行/录入验收（`--execute` 净室跑冻结用例 + `--manual-results` 人审结果） | `--task-id`、`--verifier`、`--confirmed-by` |
 | `reject` | 驳回任务（implement/input 分类；input 终态 Void） | `--task-id`、`--category`、`--reason` |
 | `close` | 关闭任务（accept → Done；`--ship` 一步双仓入库） | `--task-id`、`--decision`、`--actor`、`--push`、`--ship` |
-| `ship` | 平台仓入库（目录六要素；close --ship 内含） | 见 §7.1 |
+| `ship` | 平台仓入库（目录六要素；close --ship 内含） | 见 §7 |
 | `void` | 作废任务 | `--task-id`、`--category`、`--reason` |
 | `adjudicate` | 裁决 Blocked 任务（唯一出口：Blocked → Ready） | `--task-id`、`--category`、`--reason` |
 | `veto` | 安全否决（spec 安全闸门） | 见 `--help` |
@@ -92,7 +98,7 @@ python aidev-agent.py login --user nfsnyy --password '<口令，hints.md/口头�
   → 起草会话 submit → 对账（§7）→ 逐项裁决起草方问题
   → 出 H1/H2 签署摘要 → 用户"签" → freeze
   → 建 agent-tN 账号 + 签实现 sigt → 出实现派活卡（强调新开窗口）
-  → 实现会话 submit → 对账 → 独立复跑冻结用例（§7.5）
+  → 实现会话 submit → 对账 → 独立复跑冻结用例（§7）
   → 人工 AC：出人审走查清单 → 用户走查"通过" → 写 manual-results（证据 {path,sha256}）
   → verify --execute --manual-results → 落 verification.initial/confirm/task.verified
   → close 摘要 → 用户"确认" → close --decision accept --push --ship
@@ -103,42 +109,11 @@ python aidev-agent.py login --user nfsnyy --password '<口令，hints.md/口头�
 
 ## 5. 关键命令模板
 
-```bash
-# 签发 sigt（编排式 claim，任务转 In Progress；返回 handoff_token，第一时间存工作区 .sigt-*.txt）
-curl -s -X POST "http://127.0.0.1:8000/api/tasks/<task_id>/claims" \
-  -H "Authorization: Bearer <nfsnyy 令牌>" -H "Content-Type: application/json" -d '{"actor":"nfsnyy"}'
+低频参考，用时读 **`references/command-templates.md`**（签发/重铸 sigt、freeze 内容上传、接口类契约声明范式、verify/close；含 verify 超时与版本协商注意）。
 
-# sigt 重铸（mint_sigt 确定性，令牌丢失/损坏/折行时内容不变重发）
-python -c "from aidev.gitrepo import ensure_repository; from aidev.authn import mint_sigt; \
-print(mint_sigt('<task_id>','nfsnyy',str(ensure_repository('<状态仓>'))))"
+## 6. 派活卡模板
 
-# freeze（内容上传：CLI 本地读三件套并自动附 card_sha256/contract_sha256/mapping_sha256
-# 随件摘要 + [{"path","sha256"}] 资产清单；--repo 可省略=服务端绑定存储，逻辑 id 亦可；
-# 成功后投影自动经任务包拉取落盘 --workspace 本地目录）
-python aidev-operator.py freeze --task-id <id> \
-  --acceptance-card <本地路径>/acceptance-card.json --contract <本地路径>/contract.json \
-  --mapping <本地路径>/mapping.json --h1-actor nfsnyy --h2-actor nfsnyy \
-  [--repo <逻辑 id>] [--workspace <本地目录>]
-
-# 接口类任务冻结（T12 起）：contract 必须携带非空 interfaces 段，缺省/null → c2.interfaces_missing 拒冻
-# 判型信号 = task.md frontmatter interface_class（建任务/派生时按「新增/变更端点、表单、事件负载」标注，缺省 false）
-# 声明范式（version 1；endpoints 四凭据族 auth 矩阵 + responses.success/rejection 双形态；
-#           forms 字段三键 name/type/required；events payload schema 子集 type/required/properties/items/const）
-# 与完整示例见 doc/三件套编写规范.md §2.1（示例 = T12 冻结契约 spec-fb64d0cb 的 interfaces 段）。
-
-# verify / close（--repo 同上：省略=绑定存储，逻辑 id=绑定仓 project_id）
-python aidev-operator.py verify --task-id <id> --execute \
-  --manual-results <人审json> --verifier operator --confirmed-by nfsnyy
-python aidev-operator.py close --task-id <id> --decision accept \
-  --actor nfsnyy --reason '...' --push --ship   # ship 需 SIGNET_PLATFORM_REPO
-```
-
-## 6. 派活卡模板（两段式）
-
-卡 = **角色**（任务 id、spec 状态、执行者标签、skill 指针、实现卡加粗"必须新开 session"）→ **入场**（`login` / `claim --handoff <sigt> --workspace <路径> --on-behalf-of <标签>` 命令、sigt 代码块、"单行勿折行/验签失败找 operator 重发勿自行拼接"）→ **输入材料**（需求正文路径、原型页、格式范本 spec 路径、被测代码文件清单）→ **范围+纪律**（以冻结三件套/任务标题为准绳；不 freeze、不宣布完成、不 push；歧义列裁决项等 operator；五段式报告 + evidence）→ **收尾协议**（submit 后汇报"等 operator"，不宣布完成）。operator 侧动词参数示例一律用逻辑 id 或省略（路径形态 repo 已被服务端拒绝，400 repo.invalid_identifier）。
-
-- 起草卡：产出三件套 + 用例；新特性用例"红即规格目标"，回归类当场绿；py_compile 全过。
-- 实现卡：照冻结三件套实现；用例全绿才算完；全量回归基线只增不减。
+低频参考，出卡/返场前读 **`references/dispatch-card.md`**（两段式卡片结构、起草卡/实现卡差别、返场指令四要素）。
 
 ## 7. 对账清单（submit 后必做）
 
@@ -150,6 +125,7 @@ python aidev-operator.py close --task-id <id> --decision accept \
 6. 冻结 spec 目录复跑用例后 `find . -name __pycache__` 清杂再 push。
 7. 权威 task.md 正文非占位符（债务 #30②）：起草任务 freeze 后账本正文仍是"待补充"=断链复发——当场回填（annex/起草工作区 task-draft.md 为权威来源，回填后对账 contract.assets 钉值）并追 #30 吞并修复排期。
 8. 用例时长 lint（T13 起，起草/派活对账条款）：按探针数与子进程调用逐案估算净室时长，SIGNET_CASE_TIMEOUT 缺省 60s 下预估 >45s 必须拆案，并在案题/正文写明拆分理由（范式 = T12 case-interfaces-schema 按 argv 分 core/auth/shape/conflict 四部，拆后探针全集不变）；调大 env 或单案上限不取消缺省口径下的 45s 纪律——本条只约束编写与派活对账，不新增运行期门禁。
+9. **返场指令前置检查（T17/T20/T22 状态机三连坑）**：发出任何要求 agent 重新 claim/submit 的返场指令前，必查状态机——任务当前状态 → 返场动作需要的状态 → 状态门由谁触发。任务在 Implemented 时 agent 无法 claim：需重 claim 的返场必须 operator 先 reject 回 Ready，再发指令（或指令里写明"若状态卡住，停止并等 operator reject"，由 operator 主动先驳回）。返场指令四要素缺一不可：修正内容、执行步骤、身份要求（login 谁 / `--on-behalf-of` 谁 / 私有 HOME 防 client.json 串身份）、状态前置。发现身份归因错误时，连同重操作的状态门一起设计处置，不要只设计修正动作本身。
 
 ## 8. 签署与验收的准入纪律
 
@@ -171,14 +147,4 @@ python aidev-operator.py close --task-id <id> --decision accept \
 
 ## 9. 故障速查
 
-| 现象 | 处置 |
-|---|---|
-| `claim.not_ready` / `proposal.stale`（agent 侧报来） | 工作区投影滞后：sync 该工作区刷新，agent 重 claim |
-| `freeze.invalid_state` | 查任务状态：仅 Draft 或 Implemented 未钉扎可 freeze；已钉扎走 refreeze |
-| `c1.duplicate_case` | 用例挂多条判据——改回一案一行 |
-| `c1.invalid_strength` | strength 写了 manual——改 must，人工属性写 mapping |
-| `c3.asset_hash_mismatch` | 改冻结资产后没更新 contract.json assets 清单 |
-| verify 净室红（本地全环境绿） | allowed_env 缺标准 9 项（#21）→ refreeze 补清单 |
-| 共享 HOME client.json 被覆盖 | 每次 CLI 前重新 login（本机多 session 并行固有坑） |
-| sigt 验签失败（agent 报来） | 基本是复制折行——重铸重发（§5），内容不变 |
-| `ship.platform_repo_required` | 未 export SIGNET_PLATFORM_REPO |
+低频速查表，CLI 报错时读 **`references/troubleshooting.md`**（含 verify 超时、safety_rerun、conformance、版本协商、Windows 进程处置等）。

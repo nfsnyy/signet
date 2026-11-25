@@ -115,7 +115,8 @@ def task_inbox(repository, task_id):
 def task_materials(repository, metadata):
     """任务包材料清单（REQ-6/AC-08）：[{name, via}]——via="package" 已含于本任务包
     （skill/requirement→requirement_body/acceptance_card/assets/hints→workspace_files），
-    via 为绝对路径者经对应读端点匿名获取（AC-07 名册内规范材料）。"""
+    via 为绝对路径者经对应读端点匿名获取（AC-07 名册内规范材料）。T22/REQ-3（AC-08）：
+    /api/norms/ 条目携 sha256（规范原文字节哈希），客户端落盘逐字节核验。"""
     materials = [
         {"name": "skill", "via": "package"},
         {"name": "requirement", "via": "package"},
@@ -126,7 +127,8 @@ def task_materials(repository, metadata):
         materials.append({"name": "hints", "via": "package"})
     for norm in distribution.norm_roster():
         name = norm[:-3] if norm.endswith(".md") else norm
-        materials.append({"name": name, "via": "/api/norms/" + norm})
+        document = distribution.read_norm(None, norm)
+        materials.append({"name": name, "via": "/api/norms/" + norm, "sha256": document["sha256"]})
     return materials
 
 

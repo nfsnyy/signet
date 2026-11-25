@@ -1,18 +1,23 @@
 """signet_client 公开兼容面——T21 模块化后纯重导出（零自有实现）。
 
-34 个钉名公开名（含 ClientInputError/ServiceUnavailable）与公开常量全部自子模块
-重导出；入口脚本 `from signet_client import run` 与 T18 冻结案
+公开名（含 ClientInputError/ServiceUnavailable 与公开常量）全部自子模块重导出；
+入口脚本 `from signet_client import run` 与 T18 冻结案
 `from signet_client import local_git_ship` 钉名保持。仅标准库，零 aidev 依赖。
+
+T22/REQ-2（AC-05/AC-07）：客户端不再持有服务端签名密钥、不做本地 HMAC 验签——
+凭据域公开面以 parse_sigt（纯格式解析）取代旧本地验签/密钥读取三件套；
+handoff-inspect 输出 verified=false 并标注「未验签」，真实性一律服务端裁决。
+T22/REQ-1（AC-03）：API_VERSION 钉名常量自 http 域重导出（包内唯一模块级定义）。
 """
 
 from .http import (
+    API_VERSION,
     CLIENT_FILE,
     ClientInputError,
     DEFAULT_BASE_URL,
     HTTP_EXIT_CODES,
     REQUEST_TIMEOUT,
     ROLE_HEADER,
-    SECRET_FILE,
     ServiceUnavailable,
     client_config_path,
     decode_json,
@@ -27,12 +32,10 @@ from .http import (
 from .credentials import (
     WORKSPACE_TOKEN_FILE,
     inspect_handoff,
-    read_server_secret,
+    parse_sigt,
     resolve_cli_user,
     resolve_token,
-    server_secret_candidates,
     store_client_config,
-    verify_sigt_local,
     workspace_handoff_token,
 )
 from .projection import (

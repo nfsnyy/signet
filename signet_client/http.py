@@ -2,6 +2,8 @@
 
 职责：常量与超时、ClientInputError/ServiceUnavailable、base_url 解析、multipart/perform、
 错误输出原语（emit_error/emit_unreachable——供凭据/投影/分发各域共用，置于底层避免模块环）。
+T22/REQ-1（AC-03）：本模块承载客户端唯一钉名模块级协议版本常量（登录前与
+EP-02 核对，不兼容退出 4）；客户端不持有服务端密钥（T22/REQ-2）。
 仅标准库，不得 import aidev。
 """
 
@@ -23,7 +25,9 @@ ROLE_HEADER = "X-Signet-Role"
 
 CLIENT_FILE = "client.json"
 
-SECRET_FILE = "server-secret"
+# 客户端支持的 API 协议版本（T22/REQ-1/AC-03：signet_client 包内恰此一处钉名
+# 模块级整数常量；首版服务器协议版本为 1，不一致即拒绝继续并提示更新）。
+API_VERSION = 1
 
 def timeout_seconds():
     try:

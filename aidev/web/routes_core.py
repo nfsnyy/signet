@@ -22,6 +22,8 @@ def register(app):
     app.get("/api/health")(health)
     app.get("/api/skill")(skill_endpoint)
     app.get("/api/norms/{name:path}")(norm_endpoint)
+    app.get("/api/client/download")(client_download_endpoint)
+    app.get("/api/client/version")(client_version_endpoint)
     app.post("/api/login")(api_login)
     app.get(OPENAPI_URL, include_in_schema=False)(openapi_json_endpoint)
     app.get(DOCS_URL, include_in_schema=False)(swagger_docs_endpoint)
@@ -56,6 +58,29 @@ def norm_endpoint(request: Request, name: str):
         media_type="text/plain; charset=utf-8",
         headers={"X-Signet-Norm": norm_label},
     )
+
+
+def client_download_endpoint(request: Request):
+    # T22/REQ-1（EP-01）：匿名可达的版本化 zip 薄客户端包；字节确定性构建，
+    # 与 EP-02 版本面 sha256/size 恒等。
+    package = distribution.build_client_package()
+    return Response(
+        content=package["content"],
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="signet-client-{package["client_version"]}.zip"'},
+    )
+
+
+def client_version_endpoint(request: Request):
+    # T22/REQ-1（EP-02）：版本面恰四键——client_version/api_version/sha256/size，
+    # 与包内 manifest.json 对应字段一致。
+    package = distribution.build_client_package()
+    return ok({
+        "client_version": package["client_version"],
+        "api_version": package["api_version"],
+        "sha256": package["sha256"],
+        "size": package["size"],
+    })
 
 
 def api_login(response: Response, body: LoginBody):

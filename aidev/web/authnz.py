@@ -5,8 +5,10 @@ from ..domain import task_path
 from ..errors import PlatformError
 from ..taskfile import read_task
 
-PUBLIC_PATHS = ("/api/health", "/api/login", "/api/skill", "/api/norms", "/guide")
+PUBLIC_PATHS = ("/api/health", "/api/login", "/api/skill", "/api/norms", "/guide",
+                "/api/client/download", "/api/client/version")
 # T15（AC-09）：公开面仅增 /api/skill、/api/norms 前缀与页面 /guide，其余端点匿名行为不变。
+# T22（REQ-1/EP-01/EP-02）：客户端下载与版本面匿名可达（薄客户端自举前置，无凭据可用）。
 PUBLIC_PATH_PREFIXES = ("/api/norms",)
 # T6 CRLF 用例固化的读面语义：任务详情与状态端点匿名可读（本机信任模型内），
 # 事件/写面仍需凭据；/api/tasks 列表与其余子路径保持守卫。

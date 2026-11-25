@@ -1,7 +1,9 @@
-"""T21 core-modularization：CLI parser 与命令分发域（自 signet_client.py 整函数搬入，函数体零变更）。
+"""T21 core-modularization：CLI parser 与命令分发域（自 signet_client.py 整函数搬入）。
 
 职责：parser_for 动词面、run 入口、dispatch_request 分发、land_after_success 投影落地。
-仅标准库，不得 import aidev。
+T22/REQ-1（AC-03）：login 前先经 EP-02 核对 API 协议版本，不兼容退出 4 并提示
+「不兼容」「更新」（不做客户端自动更新）；T22/REQ-2（AC-05）：工作区 sigt 自动附带
+只做格式解析，验签一律服务端裁决。仅标准库，不得 import aidev。
 """
 
 import argparse
@@ -12,12 +14,13 @@ from pathlib import Path
 
 from .credentials import (
     inspect_handoff,
+    parse_sigt,
     resolve_token,
     store_client_config,
-    verify_sigt_local,
     workspace_handoff_token,
 )
 from .http import (
+    API_VERSION,
     HTTP_EXIT_CODES,
     ClientInputError,
     ServiceUnavailable,
@@ -148,7 +151,7 @@ def parser_for(role):
         inspect_parser.add_argument("token")
         claim_parser = subparsers.add_parser("claim")
         claim_parser.add_argument("--handoff", metavar="SIGT",
-                                  help="handoff 令牌会话启动：本地预检验签后幂等接管并落地任务包")
+                                  help="handoff 令牌会话启动：格式解析后交服务端验签裁决，幂等接管并落地任务包")
         claim_parser.add_argument("--workspace", required=True)
         claim_parser.add_argument("--actor")
         claim_parser.add_argument("--on-behalf-of")
@@ -246,9 +249,11 @@ def dispatch_request(role, arguments, sigt, sigt_payload):
         token = workspace_handoff_token(workspace) if workspace else None
         if token:
             sigt = token
-            sigt_payload, code, message = verify_sigt_local(token)
+            # T22/REQ-2（AC-05）：工作区 sigt 自动附带只做格式解析——客户端不持有
+            # 服务端密钥，令牌真实性由服务端裁决（伪造/越权一律服务端 401/403）。
+            sigt_payload, code, message = parse_sigt(token)
             if code:
-                return emit_error(code, message + "（工作区 .signet-token 验签失败）", {}, 2)
+                return emit_error(code, message + "（工作区 .signet-token 解析失败）", {}, 2)
     try:
         method, path, fields, files = build_request(role, arguments, sigt_payload)
     except ClientInputError as error:
@@ -283,6 +288,37 @@ def dispatch_request(role, arguments, sigt, sigt_payload):
     message = json.dumps(payload, ensure_ascii=True) if payload is not None else f"HTTP {status}"
     return emit_error("request.invalid", message[:500], {}, 2 if status in (400, 409, 422) else 4)
 
+def ensure_api_compatible():
+    """REQ-1/AC-03：登录前与服务器版本接口（EP-02）核对 API 协议版本。
+
+    服务器申报版本与客户端一致时返回 None 放行；不一致即拒绝继续：退出码
+    钉 4，输出明确提示「不兼容」与「更新」。首版不做客户端自动更新
+    （自更新属独立 enhancement）。
+    """
+    base_url = resolve_base_url()
+    try:
+        status, payload = perform("GET", base_url + "/api/client/version")
+    except ServiceUnavailable as error:
+        return emit_unreachable(error)
+    result = payload.get("result") if isinstance(payload, dict) else None
+    server_version = result.get("api_version") if isinstance(result, dict) else None
+    if status == 200 and isinstance(server_version, int) and server_version == API_VERSION:
+        return None
+    if status == 200 and isinstance(server_version, int):
+        code = "client.api_incompatible"
+        message = (
+            f"客户端与服务器 API 协议版本不兼容（客户端 {API_VERSION}，服务器 {server_version}）："
+            "请更新客户端包后重试"
+        )
+    else:
+        code = "client.version_probe_failed"
+        message = f"无法核对服务器 API 协议版本（HTTP {status}）：请更新客户端包或联系平台运维"
+    print(json.dumps(
+        {"ok": False, "error": {"code": code, "message": message, "details": {}}},
+        ensure_ascii=False,
+    ))
+    return 4
+
 def run(role, argv=None):
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -293,6 +329,10 @@ def run(role, argv=None):
     arguments = parser.parse_args(argv)
     if arguments.command == "handoff-inspect":
         return inspect_handoff(arguments.token)
+    if arguments.command == "login":
+        incompatible = ensure_api_compatible()
+        if incompatible is not None:
+            return incompatible
     if role == "agent" and arguments.command == "claim" and getattr(arguments, "handoff", None):
         return handoff_claim(arguments)
     if role == "operator" and arguments.command == "ship":

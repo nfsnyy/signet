@@ -1,15 +1,24 @@
-"""skill / norms 分发读取（REQ-1 唯一事实源、REQ-6 平台可获取性）。
+"""skill / norms / 客户端包分发读取（REQ-1 唯一事实源、REQ-6 平台可获取性）。
 
 skill 唯一事实源 = 平台仓 skills/aidev-agent/SKILL.md；read_skill 读取时注入
 标识行 <!-- signet-skill v{version}@{commit} -->（AC-04：解决 commit 自指
 悖论，仓内文件不强制含标识）。norms 事实源 = 平台仓 doc/，v1 名册 =
 三件套编写规范.md / 页面呈现规范.md / operator手册.md + prototype/ 全部
 .html；read_norm 白名单 + 防穿越（AC-07：404 norm.not_found /
-400 norm.invalid）。
+400 norm.invalid），并携原文字节 sha256（T22/REQ-3：任务包材料清单核验用）。
+
+T22/REQ-1：build_client_package 构建版本化 zip 薄客户端包（EP-01 下载体、
+EP-02 版本面）——钉名内容 = 双角色入口 + signet_client/ 七件 + manifest.json
++ 空 workspaces/ 骨架；确定性字节（固定条目序与时间戳），同一工作副本多次
+构建字节一致；包内不含 skill/服务端 aidev/ 包/服务端密钥/需求规范材料。
 """
+import hashlib
+import io
+import json
 import os
 import re
 import subprocess
+import zipfile
 from pathlib import Path
 
 import aidev
@@ -119,5 +128,86 @@ def read_norm(platform_root, name):
         "version": aidev.__version__,
         "commit": platform_head(root),
         "content": raw.decode("utf-8"),
+        "sha256": hashlib.sha256(raw).hexdigest(),
         "path": str(target),
+    }
+
+
+# ---------------------------------------------------------------------------
+# T22/REQ-1：版本化 zip 薄客户端包（EP-01 下载体 / EP-02 版本面）
+# ---------------------------------------------------------------------------
+
+CLIENT_ENTRY_FILES = ("aidev-agent.py", "aidev-operator.py")
+CLIENT_PACKAGE_DIRECTORY = "signet_client"
+CLIENT_PACKAGE_MEMBERS = (
+    "__init__.py",
+    "http.py",
+    "credentials.py",
+    "projection.py",
+    "legacy_ship.py",
+    "requests.py",
+    "cli.py",
+)
+CLIENT_WORKSPACES_ENTRY = "workspaces/"
+CLIENT_MANIFEST_ENTRY = "manifest.json"
+_ZIP_FIXED_DATE = (1980, 1, 1, 0, 0, 0)
+
+
+def _zip_write_entry(archive, name, data, directory=False):
+    """固定时间戳/权限位写入条目——同一输入字节流多次构建产物逐字节一致。"""
+    info = zipfile.ZipInfo(name, date_time=_ZIP_FIXED_DATE)
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.external_attr = ((0o755 << 16) | 0x10) if directory else (0o644 << 16)
+    archive.writestr(info, data)
+
+
+def build_client_package(platform_root=None):
+    """构建版本化 zip 薄客户端包（AC-01/AC-02 钉名函数）。
+
+    钉名内容：双角色入口 aidev-agent.py / aidev-operator.py、signet_client/
+    七件钉名成员、manifest.json（client_version/api_version/files[] 逐文件
+    sha256，只覆盖文件条目）、空 workspaces/ 骨架。包内不含 skill、服务端
+    aidev/ 包、服务端密钥与需求/规范材料。返回 {"content", "client_version",
+    "api_version", "sha256", "size"}；content 确定性（固定条目序 + 固定时间戳），
+    版本端点 sha256/size 与下载端点字节因此恒等。
+    """
+    root = resolve_platform_root(platform_root)
+    files = []
+    for entry in CLIENT_ENTRY_FILES:
+        source = root / entry
+        if not source.is_file():
+            raise PlatformError("client.source_missing", f"客户端入口文件缺失: {source}")
+        files.append((entry, source.read_bytes()))
+    for member in CLIENT_PACKAGE_MEMBERS:
+        source = root / CLIENT_PACKAGE_DIRECTORY / member
+        if not source.is_file():
+            raise PlatformError("client.source_missing", f"客户端模块成员缺失: {source}")
+        files.append((f"{CLIENT_PACKAGE_DIRECTORY}/{member}", source.read_bytes()))
+    files.sort(key=lambda item: item[0])
+    manifest = {
+        "client_version": aidev.__version__,
+        "api_version": aidev.API_VERSION,
+        "files": [
+            {"path": name, "sha256": hashlib.sha256(data).hexdigest()}
+            for name, data in files
+        ],
+    }
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        _zip_write_entry(archive, f"{CLIENT_PACKAGE_DIRECTORY}/", b"", directory=True)
+        _zip_write_entry(archive, CLIENT_WORKSPACES_ENTRY, b"", directory=True)
+        for name, data in files:
+            _zip_write_entry(archive, name, data)
+        _zip_write_entry(
+            archive,
+            CLIENT_MANIFEST_ENTRY,
+            (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+        )
+    content = buffer.getvalue()
+    return {
+        "content": content,
+        "client_version": manifest["client_version"],
+        "api_version": manifest["api_version"],
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "size": len(content),
     }

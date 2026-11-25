@@ -1,7 +1,11 @@
-"""T21 core-modularization：workspace 投影与任务材料域（自 signet_client.py 整函数搬入，函数体零变更）。
+"""T21 core-modularization：workspace 投影与任务材料域（自 signet_client.py 整函数搬入）。
 
 职责：resolve_task_id、contract_assets、任务包拉取与落地（pull_package/_land_package_files/
-land_projection/land_handoff_workspace）、handoff_claim。仅标准库，不得 import aidev。
+land_projection/land_handoff_workspace）、handoff_claim。
+T22/REQ-2（AC-05）：claim --handoff 取消本地 HMAC 预检，sigt 一律服务端裁决；
+T22/REQ-3（AC-08/AC-09）：投影落地后自动补齐 requirement.md、materials/norms/
+（逐字节 sha256 核验，不符即 material.hash_mismatch 且不留半成品）与 inbox/
+协作消息，同一工作区重 claim 增量复用、不清本地文件。仅标准库，不得 import aidev。
 """
 
 import hashlib
@@ -9,7 +13,7 @@ import json
 import urllib.parse
 from pathlib import Path
 
-from .credentials import WORKSPACE_TOKEN_FILE, resolve_cli_user, verify_sigt_local
+from .credentials import WORKSPACE_TOKEN_FILE, parse_sigt, resolve_cli_user
 from .http import (
     HTTP_EXIT_CODES,
     ClientInputError,
@@ -158,7 +162,72 @@ def _land_package_files(workspace, package, token=None, sigt=None, repo=None):
         target = _safe_workspace_file(workspace / "contract", name)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
+    _land_package_extras(workspace, package, token=token, sigt=sigt)
     return task_id
+
+def _land_package_extras(workspace, package, token=None, sigt=None):
+    """T22/REQ-3（AC-08）：任务包补齐材料自动落盘——requirement.md、materials/norms/
+    规范（清单条目携 sha256，逐字节核验）、inbox/ 协作消息。
+
+    规范先全量下载并核验、全部通过后才落盘：任一不符即中止并报
+    material.hash_mismatch，不留半成品文件。规范下载复用客户端统一请求出口
+    （包级 signet_client.perform 命名空间，调用时解析）。已存在文件按包内
+    字节幂等重写——同一工作区重 claim（续期）不清除本地新增文件、已落盘
+    材料字节不变（AC-09）。
+    """
+    from . import perform as unified_perform
+    workspace = Path(workspace)
+    base_url = resolve_base_url()
+    norms = []
+    for item in package.get("materials") or []:
+        if not isinstance(item, dict):
+            continue
+        via = item.get("via")
+        if not (isinstance(via, str) and via.startswith("/api/norms/")):
+            continue
+        expected = item.get("sha256")
+        if not (isinstance(expected, str) and expected):
+            raise ClientInputError("package.invalid", f"规范材料条目缺少 sha256: {item!r}", exit_code=4)
+        filename = urllib.parse.unquote(via.rstrip("/").rsplit("/", 1)[-1])
+        relative = Path(filename)
+        if not filename.strip() or relative.is_absolute() or ".." in relative.parts or len(relative.parts) != 1:
+            raise ClientInputError("package.invalid", f"规范材料名不合法: {filename!r}", exit_code=4)
+        try:
+            status, content = unified_perform(
+                "GET",
+                base_url + urllib.parse.quote(via, safe="/"),
+                token=token,
+                sigt=sigt,
+                raw=True,
+            )
+        except ServiceUnavailable as error:
+            raise ClientInputError("service.unreachable", f"规范材料下载时无法连接服务: {error.base_url}", exit_code=3) from error
+        if status != 200:
+            raise ClientInputError("material.download_failed", f"规范材料下载失败（HTTP {status}）: {filename}", exit_code=4)
+        if hashlib.sha256(content).hexdigest() != expected:
+            raise ClientInputError("material.hash_mismatch", f"规范材料 sha256 与清单不一致: {filename}", exit_code=4)
+        norms.append((filename, content))
+    requirement = package.get("requirement_body")
+    if isinstance(requirement, str):
+        (workspace / "requirement.md").write_text(requirement, encoding="utf-8", newline="\n")
+    for filename, content in norms:
+        target = workspace / "materials" / "norms" / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+    for message in package.get("inbox") or []:
+        if not isinstance(message, dict):
+            raise ClientInputError("package.invalid", f"协作消息条目形态非法: {message!r}", exit_code=4)
+        message_id = message.get("message_id")
+        if not (isinstance(message_id, str) and message_id.strip()) \
+                or Path(message_id).name != message_id or message_id in (".", ".."):
+            raise ClientInputError("package.invalid", f"协作消息 message_id 不合法: {message_id!r}", exit_code=4)
+        target = workspace / "inbox" / f"{message_id}.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(message, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
 
 def land_projection(workspace, package, token=None, repo=None):
     """REQ-3/AC-09：operator 侧投影落地——freeze/refreeze/sync/init-task/reject/adjudicate
@@ -174,8 +243,9 @@ def land_handoff_workspace(workspace, token, package):
     return task_id
 
 def handoff_claim(arguments):
-    """claim --handoff：本地预检验签（零网络）→ sigt 幂等接管 → 任务包落地工作区。"""
-    payload, code, message = verify_sigt_local(arguments.handoff)
+    """claim --handoff：格式解析（T22 起取消本地 HMAC 预检）→ 服务端验签裁决的
+    sigt 幂等接管 → 任务包落地工作区。伪造/越权令牌由服务端拒绝（零副作用）。"""
+    payload, code, message = parse_sigt(arguments.handoff)
     if code:
         return emit_error(code, message, {}, 2)
     task_id = payload["task"]
