@@ -1,211 +1,34 @@
-"""signet 平台薄壳 CLI 的公共 HTTP 客户端（仅标准库）。
-
-aidev-agent.py / aidev-operator.py 两个入口脚本共用本模块，只做三件事：
-参数解析、HTTP 请求、JSON 透传。平台业务逻辑全部在服务端（aidev.web），
-本模块不得 import aidev 的任何子模块。
-
-凭据纪律：CLI 令牌只保存在本机 ~/.signet/client.json，仅随请求发给
-SIGNET_BASE_URL 指向的本平台服务，绝不外发。
+"""T21 core-modularization 过渡承载模块（S5-S6 临时）：尚未迁入最终域模块的函数暂存于此，
+随 S6/S7 逐步搬空后删除。函数体与基线 signet_client.py 逐字节一致。
 """
 
 import argparse
-import base64
 import hashlib
-import hmac
 import json
 import os
 import subprocess
 import sys
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
-DEFAULT_BASE_URL = "http://127.0.0.1:8000"
-# 客户端请求超时（债务 #11a）：env 可配，未设置缺省 60；perform() 使用时转 float。
-REQUEST_TIMEOUT = os.environ.get("SIGNET_REQUEST_TIMEOUT", "60")
-HTTP_EXIT_CODES = {400: 2, 409: 3}
-ROLE_HEADER = "X-Signet-Role"
-CLIENT_FILE = "client.json"
-SECRET_FILE = "server-secret"
-
-
-def timeout_seconds():
-    try:
-        return float(REQUEST_TIMEOUT)
-    except (TypeError, ValueError):
-        return 60.0
-
-
-class ClientInputError(Exception):
-    def __init__(self, code, message, exit_code=2, details=None):
-        super().__init__(message)
-        self.code = code
-        self.message = message
-        self.exit_code = exit_code
-        self.details = details or {}
-
-
-class ServiceUnavailable(Exception):
-    def __init__(self, base_url, reason):
-        super().__init__(str(reason))
-        self.base_url = base_url
-        self.reason = reason
-
-
-def user_home():
-    if os.name == "nt":
-        profile = os.environ.get("USERPROFILE")
-        if profile:
-            return Path(profile)
-    return Path.home()
-
-
-def client_config_path():
-    return user_home() / ".signet" / CLIENT_FILE
-
-
-def resolve_base_url():
-    env_url = os.environ.get("SIGNET_BASE_URL")
-    if env_url and env_url.strip():
-        return env_url.rstrip("/")
-    config_path = client_config_path()
-    if config_path.is_file():
-        try:
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            config = None
-        if isinstance(config, dict):
-            base_url = config.get("base_url")
-            if isinstance(base_url, str) and base_url.strip():
-                return base_url.rstrip("/")
-    return DEFAULT_BASE_URL
-
-
-def resolve_token():
-    config_path = client_config_path()
-    if not config_path.is_file():
-        return None
-    try:
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(config, dict):
-        return None
-    token = config.get("token")
-    return token if isinstance(token, str) and token.strip() else None
-
-
-def resolve_cli_user():
-    """CLI 本人登录身份（client.json 的 user 字段），用于 sigt 委托流的 on_behalf_of 归因。"""
-    config_path = client_config_path()
-    if not config_path.is_file():
-        return None
-    try:
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(config, dict):
-        return None
-    user = config.get("user")
-    return user if isinstance(user, str) and user.strip() else None
-
-
-def server_secret_candidates():
-    """本机服务端密钥的候选路径：USERPROFILE 优先，回落 HOMEDRIVE/HOMEPATH。
-
-    临时 HOME（USERPROFILE 覆写）下验签必须仍能取到机器级密钥——
-    USERPROFILE 覆写用于隔离 client.json，不应把密钥也隔离掉。
-    """
-    candidates = [user_home()]
-    home_drive = os.environ.get("HOMEDRIVE")
-    home_path = os.environ.get("HOMEPATH")
-    if home_drive and home_path:
-        candidates.append(Path(home_drive + home_path))
-    unique = []
-    for candidate in candidates:
-        if candidate not in unique:
-            unique.append(candidate)
-    return unique
-
-
-def read_server_secret():
-    for candidate in server_secret_candidates():
-        secret_path = candidate / ".signet" / SECRET_FILE
-        try:
-            return secret_path.read_bytes(), secret_path
-        except OSError:
-            continue
-    return None, user_home() / ".signet" / SECRET_FILE
-
-
-def store_client_config(base_url, token, user=None):
-    directory = client_config_path().parent
-    directory.mkdir(parents=True, exist_ok=True)
-    config = {"base_url": base_url, "token": token}
-    if user:
-        config["user"] = user
-    client_config_path().write_text(
-        json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-
-
-def decode_json(raw):
-    try:
-        return json.loads(raw.decode("utf-8", "replace"))
-    except json.JSONDecodeError:
-        return None
-
-
-def encode_multipart(fields, files):
-    boundary = "----signetBoundary" + os.urandom(8).hex()
-    body = bytearray()
-    for name, value in fields.items():
-        body.extend(
-            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode("utf-8")
-        )
-    for name, filename, content in files:
-        body.extend(
-            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
-            f"Content-Type: application/octet-stream\r\n\r\n".encode("utf-8")
-        )
-        body.extend(content)
-        body.extend(b"\r\n")
-    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
-    return bytes(body), f"multipart/form-data; boundary={boundary}"
-
-
-_REQUEST_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-
-
-def perform(method, url, fields=None, files=None, role=None, token=None, sigt=None, raw=False):
-    headers = {}
-    if role:
-        headers[ROLE_HEADER] = role
-    if sigt:
-        headers["Authorization"] = "sigt " + sigt
-    elif token:
-        headers["Authorization"] = "Bearer " + token
-    if files is not None:
-        body, content_type = encode_multipart(fields or {}, files)
-        headers["Content-Type"] = content_type
-    elif fields is not None:
-        body = json.dumps(fields, ensure_ascii=False).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    else:
-        body = None
-    request = urllib.request.Request(url, data=body, method=method, headers=headers)
-    try:
-        with _REQUEST_OPENER.open(request, timeout=timeout_seconds()) as response:
-            content = response.read()
-            return (response.status, content) if raw else (response.status, decode_json(content))
-    except urllib.error.HTTPError as error:
-        content = error.read()
-        return (error.code, content) if raw else (error.code, decode_json(content))
-    except urllib.error.URLError as error:
-        raise ServiceUnavailable(url, error.reason) from error
-
+from .credentials import (
+    WORKSPACE_TOKEN_FILE,
+    inspect_handoff,
+    resolve_cli_user,
+    resolve_token,
+    store_client_config,
+    verify_sigt_local,
+    workspace_handoff_token,
+)
+from .http import (
+    HTTP_EXIT_CODES,
+    ClientInputError,
+    ServiceUnavailable,
+    emit_error,
+    emit_unreachable,
+    perform,
+    resolve_base_url,
+)
 
 def resolve_task_id(workspace):
     path = Path(workspace) / "task.md"
@@ -229,17 +52,163 @@ def resolve_task_id(workspace):
         raise ClientInputError("task.invalid_frontmatter", "task.md frontmatter 缺少 task_id")
     return task_id
 
-
 def read_upload(path, missing_code, missing_exit=2):
     try:
         return Path(path).name, Path(path).read_bytes()
     except OSError as error:
         raise ClientInputError(missing_code, f"文件不存在或不可读: {path}", exit_code=missing_exit) from error
 
+def contract_assets(contract_path):
+    """Collect the asset files a contract references (dependency_files + case fixtures).
 
-def present(fields):
-    return {key: value for key, value in fields.items() if value is not None}
+    Paths are resolved relative to the contract file's directory, mirroring the
+    server-side contract validation layout. Returns (manifest, files)——manifest 为
+    api-remote-ready 目标形态 [{"path","sha256"}] 对象清单（随 freeze/veto 请求
+    经 asset_manifest 字段上传，服务端逐件校验 sha256）。
+    """
+    try:
+        contract = json.loads(Path(contract_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ClientInputError("c2.invalid_contract", f"invalid JSON: {contract_path}") from error
+    if not isinstance(contract, dict):
+        raise ClientInputError("c2.invalid_contract", f"JSON document must be an object: {contract_path}")
+    referenced = []
+    environment = contract.get("environment")
+    if isinstance(environment, dict):
+        dependencies = environment.get("dependency_files", [])
+        if isinstance(dependencies, list):
+            referenced.extend(item for item in dependencies if isinstance(item, str))
+    cases = contract.get("cases", [])
+    if isinstance(cases, list):
+        for case in cases:
+            if isinstance(case, dict):
+                fixtures = case.get("fixtures", [])
+                if isinstance(fixtures, list):
+                    referenced.extend(item for item in fixtures if isinstance(item, str))
+    relative_paths = list(dict.fromkeys(referenced))
+    base = Path(contract_path).resolve().parent
+    files = []
+    manifest = []
+    for relative in relative_paths:
+        relative_path = Path(relative)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise ClientInputError("c3.invalid_fixture", f"asset path must stay inside the spec directory: {relative}")
+        full_path = base / relative_path
+        if not full_path.is_file():
+            raise ClientInputError("c3.missing_fixture", f"fixture does not exist: {relative}")
+        content = full_path.read_bytes()
+        manifest.append({"path": relative, "sha256": hashlib.sha256(content).hexdigest()})
+        files.append(("assets", relative, content))
+    return manifest, files
 
+WORKSPACE_DIRECTORIES = ("contract", "evidence", "inbox", "outbox", "outbox-collab")
+
+def _safe_workspace_file(workspace, name):
+    relative = Path(name)
+    if relative.is_absolute() or ".." in relative.parts or not str(name).strip():
+        raise ClientInputError("package.invalid_file", f"任务包文件路径不合法: {name}")
+    return Path(workspace) / relative
+
+def pull_package(base_url, task_id, token=None, sigt=None, repo=None):
+    """REQ-3/AC-09：投影客户端拉取——经任务包读面取回完整投影。repo 为 CLI
+    --repo 透传（逻辑 id/本地路径），省略时落服务端绑定存储。"""
+    path = f"/api/tasks/{task_id}/package"
+    if repo:
+        path += "?" + urllib.parse.urlencode({"repo": repo})
+    try:
+        status, payload = perform("GET", base_url + path, token=token, sigt=sigt)
+    except ServiceUnavailable as error:
+        raise ClientInputError("service.unreachable", f"拉取任务包时无法连接服务: {error.base_url}", exit_code=3) from error
+    if status != 200 or not (isinstance(payload, dict) and payload.get("ok")):
+        raise ClientInputError("package.pull_failed", f"任务包拉取失败（HTTP {status}）: {task_id}", exit_code=4)
+    return payload["result"]
+
+def _land_package_files(workspace, package, token=None, sigt=None, repo=None):
+    """把任务包落盘工作区：task.md、工作区附带文件、contract/ 资产（逐项 sha256 校验）。"""
+    workspace = Path(workspace)
+    if workspace.exists() and not workspace.is_dir():
+        raise ClientInputError("workspace.not_directory", f"工作区路径不是目录: {workspace}")
+    workspace.mkdir(parents=True, exist_ok=True)
+    for directory in WORKSPACE_DIRECTORIES:
+        (workspace / directory).mkdir(exist_ok=True)
+    metadata = package.get("metadata")
+    body = package.get("task_md")
+    if not isinstance(metadata, dict) or not isinstance(body, str):
+        raise ClientInputError("package.invalid", "服务端响应缺少任务包 metadata/task_md，已中止落地")
+    header = json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False)
+    (workspace / "task.md").write_text(f"---\n{header}\n---\n{body}", encoding="utf-8", newline="\n")
+    for name, content in (package.get("workspace_files") or {}).items():
+        target = _safe_workspace_file(workspace, name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8", newline="\n")
+    base_url = resolve_base_url()
+    task_id = metadata["task_id"]
+    for asset in package.get("assets") or []:
+        name = asset.get("name")
+        expected = asset.get("sha256")
+        if not name or not expected:
+            raise ClientInputError("package.invalid", "任务包资产清单条目缺少 name/sha256")
+        asset_path = f"/api/tasks/{task_id}/assets/{urllib.parse.quote(name)}"
+        if repo:
+            asset_path += "?" + urllib.parse.urlencode({"repo": repo})
+        try:
+            status, content = perform(
+                "GET",
+                base_url + asset_path,
+                token=token,
+                sigt=sigt,
+                raw=True,
+            )
+        except ServiceUnavailable as error:
+            raise ClientInputError("service.unreachable", f"资产下载时无法连接服务: {error.base_url}", exit_code=3) from error
+        if status != 200:
+            raise ClientInputError("asset.download_failed", f"资产下载失败（HTTP {status}）: {name}", exit_code=4)
+        if hashlib.sha256(content).hexdigest() != expected:
+            raise ClientInputError("asset.hash_mismatch", f"资产 sha256 与清单不一致: {name}", exit_code=4)
+        target = _safe_workspace_file(workspace / "contract", name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+    return task_id
+
+def land_projection(workspace, package, token=None, repo=None):
+    """REQ-3/AC-09：operator 侧投影落地——freeze/refreeze/sync/init-task/reject/adjudicate
+    成功后，CLI 自行拉取任务包并把 task.md/contract/ 三件套落盘本地 --workspace
+    （该参数自此纯客户端本地使用，不出网）。"""
+    return _land_package_files(workspace, package, token=token, repo=repo)
+
+def land_handoff_workspace(workspace, token, package):
+    """把 claim --handoff 任务包落地工作区（task.md、工作区附带文件、contract/ 资产、.signet-token）。"""
+    task_id = _land_package_files(workspace, package, sigt=token)
+    token_path = Path(workspace) / WORKSPACE_TOKEN_FILE
+    token_path.write_text(token + "\n", encoding="utf-8", newline="\n")
+    return task_id
+
+def handoff_claim(arguments):
+    """claim --handoff：本地预检验签（零网络）→ sigt 幂等接管 → 任务包落地工作区。"""
+    payload, code, message = verify_sigt_local(arguments.handoff)
+    if code:
+        return emit_error(code, message, {}, 2)
+    task_id = payload["task"]
+    base_url = resolve_base_url()
+    fields = {"actor": payload["actor"]}
+    cli_user = resolve_cli_user()
+    if cli_user:
+        fields["on_behalf_of"] = cli_user
+    try:
+        status, response = perform("POST", f"{base_url}/api/tasks/{task_id}/claims", fields=fields, sigt=arguments.handoff)
+    except ServiceUnavailable as error:
+        return emit_unreachable(error)
+    if not (isinstance(response, dict) and response.get("ok")):
+        error = response.get("error") if isinstance(response, dict) else None
+        if isinstance(error, dict) and isinstance(error.get("code"), str):
+            return emit_error(error["code"], error.get("message") or "", error.get("details") or {}, HTTP_EXIT_CODES.get(status, 4))
+        return emit_error("request.invalid", json.dumps(response, ensure_ascii=True)[:500], {}, 2 if status in (400, 409) else 4)
+    try:
+        land_handoff_workspace(arguments.workspace, arguments.handoff, response.get("result", {}).get("package") or {})
+    except ClientInputError as error:
+        return emit_error(error.code, error.message, error.details, error.exit_code)
+    print(json.dumps(response, ensure_ascii=True, sort_keys=True))
+    return 0
 
 def _git_local(repository, arguments, timeout=60):
     return subprocess.run(
@@ -251,7 +220,6 @@ def _git_local(repository, arguments, timeout=60):
         timeout=timeout,
         check=False,
     )
-
 
 def local_git_ship(task_id):
     """ship 的 CLI 本机副作用（AC-05）：平台仓由 SIGNET_PLATFORM_REPO 定位——
@@ -299,7 +267,6 @@ def local_git_ship(task_id):
         "commit_hash": commit_hash,
     }
 
-
 def run_local_ship(arguments):
     try:
         result = local_git_ship(arguments.task_id)
@@ -308,50 +275,8 @@ def run_local_ship(arguments):
     print(json.dumps({"ok": True, "result": result}, ensure_ascii=True, sort_keys=True))
     return 0
 
-
-def contract_assets(contract_path):
-    """Collect the asset files a contract references (dependency_files + case fixtures).
-
-    Paths are resolved relative to the contract file's directory, mirroring the
-    server-side contract validation layout. Returns (manifest, files)——manifest 为
-    api-remote-ready 目标形态 [{"path","sha256"}] 对象清单（随 freeze/veto 请求
-    经 asset_manifest 字段上传，服务端逐件校验 sha256）。
-    """
-    try:
-        contract = json.loads(Path(contract_path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ClientInputError("c2.invalid_contract", f"invalid JSON: {contract_path}") from error
-    if not isinstance(contract, dict):
-        raise ClientInputError("c2.invalid_contract", f"JSON document must be an object: {contract_path}")
-    referenced = []
-    environment = contract.get("environment")
-    if isinstance(environment, dict):
-        dependencies = environment.get("dependency_files", [])
-        if isinstance(dependencies, list):
-            referenced.extend(item for item in dependencies if isinstance(item, str))
-    cases = contract.get("cases", [])
-    if isinstance(cases, list):
-        for case in cases:
-            if isinstance(case, dict):
-                fixtures = case.get("fixtures", [])
-                if isinstance(fixtures, list):
-                    referenced.extend(item for item in fixtures if isinstance(item, str))
-    relative_paths = list(dict.fromkeys(referenced))
-    base = Path(contract_path).resolve().parent
-    files = []
-    manifest = []
-    for relative in relative_paths:
-        relative_path = Path(relative)
-        if relative_path.is_absolute() or ".." in relative_path.parts:
-            raise ClientInputError("c3.invalid_fixture", f"asset path must stay inside the spec directory: {relative}")
-        full_path = base / relative_path
-        if not full_path.is_file():
-            raise ClientInputError("c3.missing_fixture", f"fixture does not exist: {relative}")
-        content = full_path.read_bytes()
-        manifest.append({"path": relative, "sha256": hashlib.sha256(content).hexdigest()})
-        files.append(("assets", relative, content))
-    return manifest, files
-
+def present(fields):
+    return {key: value for key, value in fields.items() if value is not None}
 
 def build_request(role, arguments, sigt_payload=None):
     """组请求；sigt_payload 非空表示工作区自动附带模式（任务取自令牌，免 workspace 字段）。"""
@@ -561,206 +486,6 @@ def build_request(role, arguments, sigt_payload=None):
         return "GET", f"/api/inbox?{query}", None, None
     raise ClientInputError("operation.unsupported", f"unsupported command: {command}")
 
-
-def verify_sigt_local(token):
-    """纯本地解析并验签 handoff 能力令牌（sigt），不联网。
-
-    读取本机 ~/.signet/server-secret 复算 HMAC-SHA256 签名（取前 32 个
-    hex 字符）并与令牌签名段比对；返回 (payload, error_code, message)。
-    """
-    if not isinstance(token, str) or not token.startswith("sigt-"):
-        return None, "sigt.invalid", "handoff 令牌（sigt）格式不合法：不是 sigt- 前缀"
-    rest = token[len("sigt-"):]
-    if "-" not in rest:
-        return None, "sigt.invalid", "handoff 令牌（sigt）格式不合法：缺少签名段"
-    segment, signature = rest.rsplit("-", 1)
-    try:
-        padded = segment + "=" * (-len(segment) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        payload = None
-    if not isinstance(payload, dict):
-        return None, "sigt.invalid", "handoff 令牌（sigt）负载不是合法 JSON"
-    if not isinstance(payload.get("task"), str) or not payload["task"]:
-        return None, "sigt.invalid", "handoff 令牌（sigt）负载缺少 task"
-    secret, secret_path = read_server_secret()
-    if secret is None:
-        return None, "auth.secret_missing", f"无法本地验签：本机缺少服务端密钥 {secret_path}"
-    expected = hmac.new(secret, segment.encode("ascii"), hashlib.sha256).hexdigest()[:32]
-    if not hmac.compare_digest(expected, signature):
-        return None, "sigt.signature_invalid", "handoff 令牌（sigt）验签失败：令牌损坏或不属于本平台"
-    return payload, None, None
-
-
-def inspect_handoff(token):
-    """纯本地解析并验签 handoff 能力令牌（sigt），输出 v/task/actor/repo 与 valid。"""
-    if not isinstance(token, str) or not token.startswith("sigt-"):
-        return emit_error("sigt.invalid", "token is not a well-formed sigt", {}, 2)
-    rest = token[len("sigt-"):]
-    if "-" not in rest:
-        return emit_error("sigt.invalid", "token is not a well-formed sigt", {}, 2)
-    segment, signature = rest.rsplit("-", 1)
-    try:
-        padded = segment + "=" * (-len(segment) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        payload = None
-    if not isinstance(payload, dict):
-        return emit_error("sigt.invalid", "token payload is not valid base64url JSON", {}, 2)
-    secret, secret_path = read_server_secret()
-    if secret is None:
-        return emit_error("auth.secret_missing", f"server secret does not exist: {secret_path}", {}, 2)
-    expected = hmac.new(secret, segment.encode("ascii"), hashlib.sha256).hexdigest()[:32]
-    valid = hmac.compare_digest(expected, signature)
-    result = {
-        "v": payload.get("v"),
-        "task": payload.get("task"),
-        "actor": payload.get("actor"),
-        "repo": payload.get("repo"),
-        "valid": valid,
-    }
-    print(json.dumps({"ok": True, "result": result}, ensure_ascii=True, sort_keys=True))
-    return 0
-
-
-WORKSPACE_TOKEN_FILE = ".signet-token"
-WORKSPACE_DIRECTORIES = ("contract", "evidence", "inbox", "outbox", "outbox-collab")
-
-
-def workspace_handoff_token(workspace):
-    """工作区 .signet-token 存在时返回令牌文本（strip），否则 None。"""
-    if not workspace:
-        return None
-    path = Path(workspace) / WORKSPACE_TOKEN_FILE
-    if not path.is_file():
-        return None
-    try:
-        token = path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    return token if token.startswith("sigt-") else None
-
-
-def emit_unreachable(error):
-    print(f"错误：无法连接 signet 平台服务（{error.base_url}）：{error.reason}", file=sys.stderr)
-    print("请先启动服务（例如：python -m aidev.web.server，默认监听 127.0.0.1:8000），", file=sys.stderr)
-    print("或通过环境变量 SIGNET_BASE_URL 或 ~/.signet/client.json 指定已启动的服务地址。", file=sys.stderr)
-    return 3
-
-
-def _safe_workspace_file(workspace, name):
-    relative = Path(name)
-    if relative.is_absolute() or ".." in relative.parts or not str(name).strip():
-        raise ClientInputError("package.invalid_file", f"任务包文件路径不合法: {name}")
-    return Path(workspace) / relative
-
-
-def pull_package(base_url, task_id, token=None, sigt=None, repo=None):
-    """REQ-3/AC-09：投影客户端拉取——经任务包读面取回完整投影。repo 为 CLI
-    --repo 透传（逻辑 id/本地路径），省略时落服务端绑定存储。"""
-    path = f"/api/tasks/{task_id}/package"
-    if repo:
-        path += "?" + urllib.parse.urlencode({"repo": repo})
-    try:
-        status, payload = perform("GET", base_url + path, token=token, sigt=sigt)
-    except ServiceUnavailable as error:
-        raise ClientInputError("service.unreachable", f"拉取任务包时无法连接服务: {error.base_url}", exit_code=3) from error
-    if status != 200 or not (isinstance(payload, dict) and payload.get("ok")):
-        raise ClientInputError("package.pull_failed", f"任务包拉取失败（HTTP {status}）: {task_id}", exit_code=4)
-    return payload["result"]
-
-
-def _land_package_files(workspace, package, token=None, sigt=None, repo=None):
-    """把任务包落盘工作区：task.md、工作区附带文件、contract/ 资产（逐项 sha256 校验）。"""
-    workspace = Path(workspace)
-    if workspace.exists() and not workspace.is_dir():
-        raise ClientInputError("workspace.not_directory", f"工作区路径不是目录: {workspace}")
-    workspace.mkdir(parents=True, exist_ok=True)
-    for directory in WORKSPACE_DIRECTORIES:
-        (workspace / directory).mkdir(exist_ok=True)
-    metadata = package.get("metadata")
-    body = package.get("task_md")
-    if not isinstance(metadata, dict) or not isinstance(body, str):
-        raise ClientInputError("package.invalid", "服务端响应缺少任务包 metadata/task_md，已中止落地")
-    header = json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False)
-    (workspace / "task.md").write_text(f"---\n{header}\n---\n{body}", encoding="utf-8", newline="\n")
-    for name, content in (package.get("workspace_files") or {}).items():
-        target = _safe_workspace_file(workspace, name)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8", newline="\n")
-    base_url = resolve_base_url()
-    task_id = metadata["task_id"]
-    for asset in package.get("assets") or []:
-        name = asset.get("name")
-        expected = asset.get("sha256")
-        if not name or not expected:
-            raise ClientInputError("package.invalid", "任务包资产清单条目缺少 name/sha256")
-        asset_path = f"/api/tasks/{task_id}/assets/{urllib.parse.quote(name)}"
-        if repo:
-            asset_path += "?" + urllib.parse.urlencode({"repo": repo})
-        try:
-            status, content = perform(
-                "GET",
-                base_url + asset_path,
-                token=token,
-                sigt=sigt,
-                raw=True,
-            )
-        except ServiceUnavailable as error:
-            raise ClientInputError("service.unreachable", f"资产下载时无法连接服务: {error.base_url}", exit_code=3) from error
-        if status != 200:
-            raise ClientInputError("asset.download_failed", f"资产下载失败（HTTP {status}）: {name}", exit_code=4)
-        if hashlib.sha256(content).hexdigest() != expected:
-            raise ClientInputError("asset.hash_mismatch", f"资产 sha256 与清单不一致: {name}", exit_code=4)
-        target = _safe_workspace_file(workspace / "contract", name)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
-    return task_id
-
-
-def land_projection(workspace, package, token=None, repo=None):
-    """REQ-3/AC-09：operator 侧投影落地——freeze/refreeze/sync/init-task/reject/adjudicate
-    成功后，CLI 自行拉取任务包并把 task.md/contract/ 三件套落盘本地 --workspace
-    （该参数自此纯客户端本地使用，不出网）。"""
-    return _land_package_files(workspace, package, token=token, repo=repo)
-
-
-def land_handoff_workspace(workspace, token, package):
-    """把 claim --handoff 任务包落地工作区（task.md、工作区附带文件、contract/ 资产、.signet-token）。"""
-    task_id = _land_package_files(workspace, package, sigt=token)
-    token_path = Path(workspace) / WORKSPACE_TOKEN_FILE
-    token_path.write_text(token + "\n", encoding="utf-8", newline="\n")
-    return task_id
-
-
-def handoff_claim(arguments):
-    """claim --handoff：本地预检验签（零网络）→ sigt 幂等接管 → 任务包落地工作区。"""
-    payload, code, message = verify_sigt_local(arguments.handoff)
-    if code:
-        return emit_error(code, message, {}, 2)
-    task_id = payload["task"]
-    base_url = resolve_base_url()
-    fields = {"actor": payload["actor"]}
-    cli_user = resolve_cli_user()
-    if cli_user:
-        fields["on_behalf_of"] = cli_user
-    try:
-        status, response = perform("POST", f"{base_url}/api/tasks/{task_id}/claims", fields=fields, sigt=arguments.handoff)
-    except ServiceUnavailable as error:
-        return emit_unreachable(error)
-    if not (isinstance(response, dict) and response.get("ok")):
-        error = response.get("error") if isinstance(response, dict) else None
-        if isinstance(error, dict) and isinstance(error.get("code"), str):
-            return emit_error(error["code"], error.get("message") or "", error.get("details") or {}, HTTP_EXIT_CODES.get(status, 4))
-        return emit_error("request.invalid", json.dumps(response, ensure_ascii=True)[:500], {}, 2 if status in (400, 409) else 4)
-    try:
-        land_handoff_workspace(arguments.workspace, arguments.handoff, response.get("result", {}).get("package") or {})
-    except ClientInputError as error:
-        return emit_error(error.code, error.message, error.details, error.exit_code)
-    print(json.dumps(response, ensure_ascii=True, sort_keys=True))
-    return 0
-
-
 def parser_for(role):
     parser = argparse.ArgumentParser(prog=f"aidev-{role}")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -924,7 +649,6 @@ def parser_for(role):
     log_parser.add_argument("--task-id", required=True)
     return parser
 
-
 def land_after_success(role, arguments, payload, base_url, token):
     """REQ-3/AC-09：operator 侧动词成功后自行拉取任务包并落地投影——服务端已删除
     全部 client 工作区写面；--workspace 自此纯客户端本地使用。返回退出码或 None。"""
@@ -972,12 +696,48 @@ def land_after_success(role, arguments, payload, base_url, token):
         return emit_error(error.code, error.message, error.details, error.exit_code)
     return None
 
-
-def emit_error(code, message, details, exit_code):
-    response = {"ok": False, "error": {"code": code, "message": message, "details": details}}
-    print(json.dumps(response, ensure_ascii=True, sort_keys=True))
-    return exit_code
-
+def dispatch_request(role, arguments, sigt, sigt_payload):
+    if role == "agent" and sigt is None:
+        workspace = getattr(arguments, "workspace", None)
+        token = workspace_handoff_token(workspace) if workspace else None
+        if token:
+            sigt = token
+            sigt_payload, code, message = verify_sigt_local(token)
+            if code:
+                return emit_error(code, message + "（工作区 .signet-token 验签失败）", {}, 2)
+    try:
+        method, path, fields, files = build_request(role, arguments, sigt_payload)
+    except ClientInputError as error:
+        return emit_error(error.code, error.message, error.details, error.exit_code)
+    base_url = resolve_base_url()
+    token = None if arguments.command == "login" or sigt else resolve_token()
+    try:
+        status, payload = perform(method, base_url + path, fields=fields, files=files, role=role, token=token, sigt=sigt)
+    except ServiceUnavailable as error:
+        return emit_unreachable(error)
+    if arguments.command == "login" and status == 200 and isinstance(payload, dict) and payload.get("ok"):
+        result = payload.get("result") or {}
+        store_client_config(base_url, result.get("token"), result.get("user"))
+        print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+        return 0
+    if isinstance(payload, dict) and payload.get("ok") is True and "result" in payload:
+        landing = land_after_success(role, arguments, payload, base_url, token)
+        if landing is not None:
+            return landing
+        print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+        return 0
+    if isinstance(payload, dict) and payload.get("ok") is False and isinstance(payload.get("error"), dict):
+        error = payload["error"]
+        print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+        return HTTP_EXIT_CODES.get(status, 4)
+    if status == 200 and isinstance(payload, dict):
+        print(json.dumps({"ok": True, "result": payload}, ensure_ascii=True, sort_keys=True))
+        return 0
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, dict) and isinstance(error.get("code"), str):
+        return emit_error(error["code"], error.get("message") or "", error.get("details") or {}, HTTP_EXIT_CODES.get(status, 4))
+    message = json.dumps(payload, ensure_ascii=True) if payload is not None else f"HTTP {status}"
+    return emit_error("request.invalid", message[:500], {}, 2 if status in (400, 409, 422) else 4)
 
 def run(role, argv=None):
     for stream in (sys.stdout, sys.stderr):
@@ -1026,47 +786,3 @@ def run(role, argv=None):
         arguments.ship_fingerprint = None
         return dispatch_request(role, arguments, sigt=None, sigt_payload=None)
     return dispatch_request(role, arguments, sigt=None, sigt_payload=None)
-
-
-def dispatch_request(role, arguments, sigt, sigt_payload):
-    if role == "agent" and sigt is None:
-        workspace = getattr(arguments, "workspace", None)
-        token = workspace_handoff_token(workspace) if workspace else None
-        if token:
-            sigt = token
-            sigt_payload, code, message = verify_sigt_local(token)
-            if code:
-                return emit_error(code, message + "（工作区 .signet-token 验签失败）", {}, 2)
-    try:
-        method, path, fields, files = build_request(role, arguments, sigt_payload)
-    except ClientInputError as error:
-        return emit_error(error.code, error.message, error.details, error.exit_code)
-    base_url = resolve_base_url()
-    token = None if arguments.command == "login" or sigt else resolve_token()
-    try:
-        status, payload = perform(method, base_url + path, fields=fields, files=files, role=role, token=token, sigt=sigt)
-    except ServiceUnavailable as error:
-        return emit_unreachable(error)
-    if arguments.command == "login" and status == 200 and isinstance(payload, dict) and payload.get("ok"):
-        result = payload.get("result") or {}
-        store_client_config(base_url, result.get("token"), result.get("user"))
-        print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
-        return 0
-    if isinstance(payload, dict) and payload.get("ok") is True and "result" in payload:
-        landing = land_after_success(role, arguments, payload, base_url, token)
-        if landing is not None:
-            return landing
-        print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
-        return 0
-    if isinstance(payload, dict) and payload.get("ok") is False and isinstance(payload.get("error"), dict):
-        error = payload["error"]
-        print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
-        return HTTP_EXIT_CODES.get(status, 4)
-    if status == 200 and isinstance(payload, dict):
-        print(json.dumps({"ok": True, "result": payload}, ensure_ascii=True, sort_keys=True))
-        return 0
-    error = payload.get("error") if isinstance(payload, dict) else None
-    if isinstance(error, dict) and isinstance(error.get("code"), str):
-        return emit_error(error["code"], error.get("message") or "", error.get("details") or {}, HTTP_EXIT_CODES.get(status, 4))
-    message = json.dumps(payload, ensure_ascii=True) if payload is not None else f"HTTP {status}"
-    return emit_error("request.invalid", message[:500], {}, 2 if status in (400, 409, 422) else 4)
