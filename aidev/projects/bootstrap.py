@@ -1,5 +1,7 @@
-"""T21 core-modularization 过渡承载模块（S1-S3 临时）：尚未迁入最终域模块的函数暂存于此，
-随 S2/S3/S4 逐步搬空后删除。函数体与基线 aidev/projects.py 逐字节一致。
+"""T21 core-modularization：项目引导骨架与注册初始化域（自 aidev/projects.py 整函数搬入，函数体零变更）。
+
+职责：skeleton_tree 骨架落盘、register_project 注册全流程、凭据供给校验与可达性探测、
+project_credentials_view。公开导入面为 aidev.projects（纯重导出）。
 """
 
 import json
@@ -14,6 +16,7 @@ from ..errors import OperationalError, PlatformError
 from ..gitrepo import run_git
 from ..jsonio import append_jsonl, new_id, utc_now
 
+from .clones import _git_template_dir
 from .credentials import (
     ASKPASS_TEMPLATE,
     _shquote,
@@ -25,7 +28,6 @@ from .credentials import (
     upsert_git_credential,
     validate_credential,
 )
-from .clones import _git_template_dir
 from .registry import (
     GIT_IDENTITY,
     PROJECT_MARKER,

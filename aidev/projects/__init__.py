@@ -72,7 +72,7 @@ from .clones import (
     ensure_clone,
     fetch_integrate,
 )
-from ._pending import (
+from .bootstrap import (
     GETTING_STARTED_BODY,
     HINTS_TEMPLATE,
     SKELETON_DIRS,
