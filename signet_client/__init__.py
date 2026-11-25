@@ -49,11 +49,13 @@ from .legacy_ship import (
     local_git_ship,
     run_local_ship,
 )
-from ._pending import (
+from .requests import (
     build_request,
+    present,
+)
+from .cli import (
     dispatch_request,
     land_after_success,
     parser_for,
-    present,
     run,
 )
