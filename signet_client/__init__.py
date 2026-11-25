@@ -35,21 +35,25 @@ from .credentials import (
     verify_sigt_local,
     workspace_handoff_token,
 )
-from ._pending import (
+from .projection import (
     WORKSPACE_DIRECTORIES,
-    build_request,
     contract_assets,
-    dispatch_request,
     handoff_claim,
-    land_after_success,
     land_handoff_workspace,
     land_projection,
-    local_git_ship,
-    parser_for,
-    present,
     pull_package,
     read_upload,
     resolve_task_id,
-    run,
+)
+from .legacy_ship import (
+    local_git_ship,
     run_local_ship,
+)
+from ._pending import (
+    build_request,
+    dispatch_request,
+    land_after_success,
+    parser_for,
+    present,
+    run,
 )
