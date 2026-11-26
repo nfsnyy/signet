@@ -23,20 +23,25 @@ def _git_local(repository, arguments, timeout=60):
     )
 
 def local_git_ship(task_id):
-    """ship 的 CLI 本机副作用（AC-05）：平台仓由 SIGNET_PLATFORM_REPO 定位——
+    """ship 的 CLI 本机副作用（AC-05）：代码仓工作副本由 SIGNET_CODE_REPO 定位——
+    T23/REQ-4 CODE_REPO 抽象：对任意项目的本地 clone 同语义，无内置项目专属分支；
+    迁移期旧名 SIGNET_PLATFORM_REPO 兼容（仅设旧名同等生效，两者同设新名优先，
+    旧名仓不被触碰），两者皆缺报 ship.code_repo_required 并点名新名。
     工作副本有未提交改动时 add/commit/push（提交信息含 task_id），干净时幂等 noop。
     纯本机 git 操作，不经服务端；task.shipped 事件由 API ship / close --ship 落账。
     """
-    root = os.environ.get("SIGNET_PLATFORM_REPO") or ""
+    root = os.environ.get("SIGNET_CODE_REPO") or ""
+    if not root.strip():
+        root = os.environ.get("SIGNET_PLATFORM_REPO") or ""
     if not root.strip():
         raise ClientInputError(
-            "ship.platform_repo_required",
-            "ship 需要环境变量 SIGNET_PLATFORM_REPO 定位平台仓工作副本",
+            "ship.code_repo_required",
+            "ship 需要环境变量 SIGNET_CODE_REPO 定位代码仓工作副本（迁移期旧名 SIGNET_PLATFORM_REPO 兼容）",
         )
     root = Path(root)
     probe = _git_local(root, ["rev-parse", "--is-inside-work-tree"])
     if probe.returncode != 0 or probe.stdout.strip() != "true":
-        raise ClientInputError("ship.not_a_worktree", f"SIGNET_PLATFORM_REPO 不是 git 工作副本: {root}")
+        raise ClientInputError("ship.not_a_worktree", f"SIGNET_CODE_REPO 不是 git 工作副本: {root}")
     committed = False
     status = _git_local(root, ["status", "--porcelain"])
     if status.returncode != 0:

@@ -97,6 +97,12 @@ class SkillDriftTests(unittest.TestCase):
     def setUpClass(cls):
         cls.text = SKILL_PATH.read_text(encoding="utf-8")
         _, cls.body = parse_frontmatter(cls.text)
+        # T23：skill 文档面 = 正文 + references/（低频参考瘦身外移后的完整断言面；
+        # token 被从文档面删除仍红，断言强度不降）。
+        references_dir = SKILL_PATH.parent / "references"
+        cls.doc_face = cls.body + "\n" + "\n".join(
+            path.read_text(encoding="utf-8") for path in sorted(references_dir.glob("*.md"))
+        )
 
     def test_agent_verbs_match_cli(self):
         implemented = cli_verbs("agent")
@@ -119,7 +125,7 @@ class SkillDriftTests(unittest.TestCase):
 
     def test_collab_actions_documented(self):
         for action in sorted(collaboration.ANSWER_ACTIONS):
-            self.assertRegex(self.body, re.compile(re.escape(action)))
+            self.assertRegex(self.doc_face, re.compile(re.escape(action)))
 
     def test_workspace_layout_documented(self):
         for name in ("task.md", "AGENTS.md"):

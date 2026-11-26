@@ -58,6 +58,33 @@ class LoginBody(BaseModel):
     password: str
 
 
+class UserCreateBody(BaseModel):
+    """T23/REQ-5（EP-02）：远程建号请求体。"""
+
+    user: str
+    password: str
+
+
+class UserPasswordBody(BaseModel):
+    """T23/REQ-5（EP-04）：远程重置口令请求体。"""
+
+    password: str
+
+
+class SigtReissueBody(BaseModel):
+    """T23/REQ-5（EP-05）：SIGT 重发请求体（repo 省略落任务所属项目）。"""
+
+    actor: str
+    repo: str | None = None
+
+
+class DocPutBody(BaseModel):
+    """T23/REQ-5（EP-07）：白名单文档带版本更新请求体（base_sha256 缺省=仅创建）。"""
+
+    base_sha256: str | None = None
+    content: str
+
+
 class EnhancementBody(ActorValidatingModel):
     workspace: str
     actor: str | None = None

@@ -2,7 +2,7 @@ import html
 
 from .. import authn
 from ..domain import task_path
-from ..errors import PlatformError
+from ..errors import AuthorizationError, PlatformError
 from ..taskfile import read_task
 
 PUBLIC_PATHS = ("/api/health", "/api/login", "/api/skill", "/api/norms", "/guide",
@@ -175,6 +175,19 @@ def pat_path_allowed(method, path):
 
 def credentials(request):
     return request.state.auth
+
+
+def require_user_context(request):
+    """T23/REQ-5：远程管理端点（账号生命周期/SIGT 重发/白名单文档）仅本人登录
+    （用户令牌或会话 cookie）可用；sigt/PAT 一律 403，匿名由中间件 401 拦截
+    （首个 owner 初始化仍属带外运维，平台无远程 bootstrap 通道）。"""
+    context = credentials(request)
+    if context["kind"] != "user":
+        raise AuthorizationError(
+            "authz.operator_only",
+            "remote admin endpoints require an interactive user login (user token or session cookie)",
+        )
+    return context
 
 
 def load_authoritative_task(repository, task_id):

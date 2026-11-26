@@ -83,6 +83,13 @@ whenToUse: 当用户要求我接管/执行 operator 职责（建任务、出派�
 | `adjudicate` | 裁决 Blocked 任务（唯一出口：Blocked → Ready） | `--task-id`、`--category`、`--reason` |
 | `veto` | 安全否决（spec 安全闸门） | 见 `--help` |
 | `inbox` | 协作信箱查看 | 见 `--help` |
+| `user-create` | 远程建号（EP-02，仅本人登录；建号即生效） | `--user`、`--password` |
+| `user-disable` | 远程停用账号（停用即不可登录） | `--user` |
+| `user-reset-password` | 远程重置口令（重置即解除停用） | `--user`、`--password` |
+| `user-list` | 远程账号列表 | 无 |
+| `sigt-reissue` | SIGT 重发（确定性重铸，零账本副作用） | `--task-id`、`--actor`（`--repo` 可省略） |
+| `doc-get` | 白名单文档读取（hints.md / design/<单段名>.md） | `--name` |
+| `doc-put` | 白名单文档带版本更新（base 冲突 409 → 退出码 3） | `--name`、`--file`（`--base-sha256` 缺省仅创建） |
 | `health` | 服务探针 | 无 |
 | `log` | 事件回放 | 见 `--help` |
 

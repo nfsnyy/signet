@@ -25,12 +25,25 @@
 
 探测凭据由 verify 环境在进程内经 ``configure_probes`` 注入；未注入时各凭据族
 按上述请求形状发占位值（对账面按请求形态分流时仍可四族全覆盖）。
+
+T23/REQ-5 写端点探测方法学（偿还设计稿债务 #38① 的本任务批次）：
+
+- 路径模板除 ``{task_id}`` 外增补 ``{user}``（探测账号）与 ``{name}``（探测
+  文档 hints.md）替换；
+- POST 端点按钉名路径合成最小合法请求体（账号建/停/重置、SIGT 重发、文档
+  幂等回写），四凭据族共用同形请求——匿名/sigt 在授权层被拒（401/403），
+  user_token/session_cookie 走通正向 2xx；
+- 副作用纪律：探测账号（conf-probe-* 随机别名）在 check_contract 收尾从
+  users.json 移除（事后清理）；SIGT 重发与文档幂等回写（base 匹配 + 内容
+  逐字节不变 → 服务端零写盘/零 commit/零审计）本身零账本副作用。
 """
 
 import asyncio
 import base64
+import hashlib
 import json
 import re
+import secrets
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -45,6 +58,14 @@ CODE_STATUS_MISMATCH = "c8.conformance_status_mismatch"
 CODE_AUTH_MISMATCH = "c8.conformance_auth_mismatch"
 
 _PROBE = {"user_token": None, "sigt": None, "session_cookie": None, "task_id": None}
+
+# T23 写端点探测状态：本次 check_contract 创建的探测账号（收尾统一清理）与
+# {user} 模板替换账号（直建编排账号，与 EP-02 探测副作用解耦——匿名/sigt 族
+# 探测在授权层被拒，并不真正建号）。
+_PROBE_STATE = {"accounts": [], "user": None}
+
+PROBE_DOC_NAME = "hints.md"
+PROBE_SIGT_ACTOR = "conformance-probe"
 
 
 def configure_probes(user_token=None, sigt=None, session_cookie=None, task_id=None):
@@ -66,8 +87,11 @@ def check_contract(interfaces, surface, repository=None):
         return []
     task_id = _probe_task_id()
     findings = []
-    for endpoint in interfaces.get("endpoints") or []:
-        findings.extend(_check_endpoint(endpoint, surface, task_id))
+    try:
+        for endpoint in interfaces.get("endpoints") or []:
+            findings.extend(_check_endpoint(endpoint, surface, task_id, repository=repository))
+    finally:
+        _teardown_probe_accounts()
     for form in interfaces.get("forms") or []:
         findings.extend(_check_form(form, surface))
     if repository is not None:
@@ -79,11 +103,15 @@ def check_contract(interfaces, surface, repository=None):
 # 探测传输：in-proc ASGI 直调或 base URL
 # ---------------------------------------------------------------------------
 
-async def _asgi_request(app, method, path, headers):
+async def _asgi_request(app, method, path, headers, body=b""):
     captured = {"status": None, "headers": {}, "body": b""}
+    sent = {"done": False}
 
     async def receive():
-        return {"type": "http.request", "body": b"", "more_body": False}
+        if sent["done"]:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        sent["done"] = True
+        return {"type": "http.request", "body": body, "more_body": False}
 
     async def send(message):
         if message["type"] == "http.response.start":
@@ -113,16 +141,16 @@ async def _asgi_request(app, method, path, headers):
     return captured["status"], captured["headers"], captured["body"]
 
 
-def _request(surface, method, path, headers):
+def _request(surface, method, path, headers, body=None):
     if isinstance(surface, str):
         url = surface.rstrip("/") + path
-        request = urllib.request.Request(url, method=method, headers=headers)
+        request = urllib.request.Request(url, method=method, headers=headers, data=body)
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 return response.status, dict(response.headers), response.read()
         except urllib.error.HTTPError as error:
             return error.code, dict(error.headers), error.read()
-    return asyncio.run(_asgi_request(surface, method, path, headers))
+    return asyncio.run(_asgi_request(surface, method, path, headers, body=body or b""))
 
 
 def _family_headers(family):
@@ -161,6 +189,86 @@ def _probe_task_id():
         return ""
     task = document.get("task") if isinstance(document, dict) else None
     return task if isinstance(task, str) else ""
+
+
+# ---------------------------------------------------------------------------
+# T23 写端点探测：请求体合成、探测账号生命周期与事后清理
+# ---------------------------------------------------------------------------
+
+def _probe_account():
+    """{user} 模板探测账号：直建编排账号（债务 #38①「编排账号 + 事后清理」），
+    不依赖 EP-02 探测副作用（其匿名/sigt 族探测并不真正建号）；直写存储不经
+    管理动词，审计零噪音。"""
+    if _PROBE_STATE["user"]:
+        return _PROBE_STATE["user"]
+    from . import authn
+    from .jsonio import utc_now
+    alias = f"conf-probe-{secrets.token_hex(4)}"
+    users = authn.load_users()
+    salt = secrets.token_hex(16)
+    users[alias] = {
+        "salt": salt,
+        "password_hash": authn.password_digest(secrets.token_hex(8), salt),
+        "created_at": utc_now(),
+        "disabled": False,
+    }
+    authn.save_users(users)
+    _PROBE_STATE["accounts"].append(alias)
+    _PROBE_STATE["user"] = alias
+    return alias
+
+
+def _probe_doc_body(repository):
+    """EP-07 正向探测体：现行字节原样回写——base 匹配 + 内容逐字节不变时服务端
+    幂等零副作用（零写盘/零 commit/零审计），探测不污染权威账本。"""
+    if not repository:
+        return None
+    target = Path(repository) / PROBE_DOC_NAME
+    try:
+        raw = target.read_bytes()
+    except OSError:
+        return None
+    return {"base_sha256": hashlib.sha256(raw).hexdigest(), "content": raw.decode("utf-8")}
+
+
+def _probe_body(method, path_template, repository):
+    """按钉名路径合成写端点最小合法探测体（四凭据族共用同形请求；无声明体的
+    端点返回 None，保持 T12 读端点探测形态零变更）。"""
+    if method != "POST":
+        return None
+    if path_template == "/api/users":
+        alias = f"conf-probe-{secrets.token_hex(4)}"
+        _PROBE_STATE["accounts"].append(alias)
+        return {"user": alias, "password": secrets.token_hex(8)}
+    if path_template == "/api/users/{user}/password":
+        return {"password": secrets.token_hex(8)}
+    if path_template == "/api/tasks/{task_id}/sigt":
+        return {"actor": PROBE_SIGT_ACTOR}
+    if path_template == "/api/docs/{name}":
+        return _probe_doc_body(repository)
+    return None
+
+
+def _teardown_probe_accounts():
+    """探测账号事后清理（债务 #38① 纪律）：从 users.json 移除本次探测创建的
+    全部账号；best-effort，清理失败不影响对账结论。"""
+    aliases = _PROBE_STATE["accounts"]
+    _PROBE_STATE["accounts"] = []
+    _PROBE_STATE["user"] = None
+    if not aliases:
+        return
+    try:
+        from . import authn
+        users = authn.load_users()
+        changed = False
+        for alias in aliases:
+            if alias in users:
+                users.pop(alias)
+                changed = True
+        if changed:
+            authn.save_users(users)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -254,10 +362,15 @@ def _json_document(body):
 # 端点：auth 矩阵探测 + 响应体 diff
 # ---------------------------------------------------------------------------
 
-def _check_endpoint(endpoint, surface, task_id):
+def _check_endpoint(endpoint, surface, task_id, repository=None):
     findings = []
     method = endpoint.get("method") or "GET"
-    path = (endpoint.get("path") or "").replace("{task_id}", task_id or "")
+    path_template = endpoint.get("path") or ""
+    path = path_template.replace("{task_id}", task_id or "")
+    if "{user}" in path:
+        path = path.replace("{user}", _probe_account())
+    if "{name}" in path:
+        path = path.replace("{name}", PROBE_DOC_NAME)
     declaration_id = endpoint.get("id")
     auth = endpoint.get("auth") or {}
     responses = endpoint.get("responses") or {}
@@ -266,7 +379,13 @@ def _check_endpoint(endpoint, surface, task_id):
             continue
         declared = auth[family]
         declared_list = declared if isinstance(declared, list) else [declared]
-        status, _headers, body = _request(surface, method, path, _family_headers(family))
+        headers = _family_headers(family)
+        body_fields = _probe_body(method, path_template, repository)
+        request_body = None
+        if body_fields is not None:
+            request_body = json.dumps(body_fields, ensure_ascii=False).encode("utf-8")
+            headers = {**headers, "Content-Type": "application/json"}
+        status, _headers, body = _request(surface, method, path, headers, body=request_body)
         actual = status if status is not None else 0
         actual_allow = 200 <= actual <= 299
         if actual not in declared_list:

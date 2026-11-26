@@ -4,9 +4,9 @@ from pathlib import Path
 from fastapi import File, Form, Header, Query, Request, UploadFile
 from fastapi.responses import Response
 
-from .. import readmodel
+from .. import authn, readmodel
 from ..collaboration import collab_answer, collab_send
-from ..domain import task_path
+from ..domain import task_path, validate_actor_alias
 from ..errors import AuthorizationError, NotFoundError, PlatformError
 from ..service import (
     block,
@@ -20,6 +20,7 @@ from ..service import (
     init_task,
     resolve_spec_asset,
     resolve_task_evidence,
+    sigt_repo_field,
     status,
     submit,
     submit_authoritative,
@@ -28,7 +29,7 @@ from ..service import (
 )
 from ..taskfile import read_task
 from ..vetoes import settle_expired_vetoes
-from .authnz import credentials, load_authoritative_task, ok
+from .authnz import credentials, load_authoritative_task, ok, require_user_context
 from .context import (
     _sigt_task_guard,
     _verify_sigt_project,
@@ -46,6 +47,7 @@ from .models import (
     CollabSendBody,
     EnhancementBody,
     InitTaskBody,
+    SigtReissueBody,
     check_actor_aliases,
 )
 from .uploads import save_upload
@@ -58,6 +60,7 @@ def register(app):
     app.get("/api/tasks/{task_id}/package")(task_package_endpoint)
     app.get("/api/tasks/{task_id}/events")(events_endpoint)
     app.post("/api/tasks/{task_id}/claims")(claims_endpoint)
+    app.post("/api/tasks/{task_id}/sigt")(task_sigt_reissue_endpoint)
     app.get("/api/tasks/{task_id}/assets/{name:path}")(task_asset_endpoint)
     app.get("/api/tasks/{task_id}/evidence/{name:path}")(task_evidence_endpoint)
     app.post("/api/tasks/{task_id}/submission")(submission_endpoint)
@@ -136,6 +139,21 @@ def claims_endpoint(request: Request, task_id: str, body: ClaimBody | None = Non
             repository, task_id, context["actor"], on_behalf_of, sigt_repo=context.get("repo")))
     repository = task_repository(app_ctx, request, task_id, repo_value, for_write=True)
     return ok(claim_authoritative(repository, task_id, request_actor(request)))
+
+
+def task_sigt_reissue_endpoint(request: Request, task_id: str, body: SigtReissueBody):
+    # T23/REQ-5（EP-05）：SIGT 重发授权远程通道——仅本人登录（sigt/PAT 403、匿名 401）。
+    # 按 (task_id, actor, 项目 project_id) 确定性重铸（mint_sigt 与 claim 签发同源，
+    # 同参数重发逐字一致）；零账本副作用（不落事件、不动 HEAD）；动作落
+    # service-audit.jsonl（action=reissue-sigt，actor=操作 operator，source="api"）。
+    app_ctx = request.app.state.app_ctx
+    context = require_user_context(request)
+    validate_actor_alias(body.actor)
+    repository = task_repository(app_ctx, request, task_id, body.repo)
+    repo_field = sigt_repo_field(repository)
+    token = authn.mint_sigt(task_id, body.actor, repo_field)
+    authn.append_audit("reissue-sigt", body.actor, actor=context["actor"], source="api")
+    return ok({"task_id": task_id, "actor": body.actor, "repo": repo_field, "sigt": token})
 
 
 def task_asset_endpoint(request: Request, task_id: str, name: str, repo: str | None = None):

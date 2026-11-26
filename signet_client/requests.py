@@ -222,4 +222,27 @@ def build_request(role, arguments, sigt_payload=None):
     if command == "inbox":
         query = urllib.parse.urlencode(present({"repo": arguments.repo, "task_id": arguments.task_id}))
         return "GET", f"/api/inbox?{query}", None, None
+    # T23/REQ-5（AC-07）：远程 operator 日常生命周期动词——授权远程通道
+    # （EP-01~EP-07，仅本人登录）；doc-put 的 base 冲突（409）映射退出码 3。
+    if command == "user-create":
+        return "POST", "/api/users", {"user": arguments.user, "password": arguments.password}, None
+    if command == "user-disable":
+        return "POST", f"/api/users/{urllib.parse.quote(arguments.user, safe='')}/disable", None, None
+    if command == "user-reset-password":
+        return "POST", f"/api/users/{urllib.parse.quote(arguments.user, safe='')}/password", {"password": arguments.password}, None
+    if command == "user-list":
+        return "GET", "/api/users", None, None
+    if command == "sigt-reissue":
+        fields = present({"actor": arguments.actor, "repo": getattr(arguments, "repo", None)})
+        return "POST", f"/api/tasks/{arguments.task_id}/sigt", fields, None
+    if command == "doc-get":
+        return "GET", f"/api/docs/{urllib.parse.quote(arguments.name, safe='/')}", None, None
+    if command == "doc-put":
+        _name, raw = read_upload(arguments.file, "doc.file_missing")
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ClientInputError("doc.file_invalid", f"doc-put 文件必须是 UTF-8 文本: {arguments.file}")
+        fields = {"base_sha256": getattr(arguments, "base_sha256", None), "content": content}
+        return "POST", f"/api/docs/{urllib.parse.quote(arguments.name, safe='/')}", fields, None
     raise ClientInputError("operation.unsupported", f"unsupported command: {command}")

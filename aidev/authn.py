@@ -109,7 +109,7 @@ def password_digest(password, salt):
     return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), PBKDF2_ITERATIONS).hex()
 
 
-def create_user(alias, password):
+def create_user(alias, password, audit_actor="local-admin", audit_source="aidev-admin"):
     ensure_data_dir()
     validate_actor_alias(alias)
     if not password or not password.strip():
@@ -125,11 +125,11 @@ def create_user(alias, password):
         "disabled": False,
     }
     save_users(users)
-    append_audit("create-user", alias)
+    append_audit("create-user", alias, actor=audit_actor, source=audit_source)
     return {"user": alias, "created_at": users[alias]["created_at"]}
 
 
-def set_user_password(alias, password):
+def set_user_password(alias, password, audit_actor="local-admin", audit_source="aidev-admin"):
     ensure_data_dir()
     if not password or not password.strip():
         raise PlatformError("admin.password_required", "password must be a non-empty string")
@@ -141,18 +141,18 @@ def set_user_password(alias, password):
     users[alias]["password_hash"] = password_digest(password, salt)
     users[alias]["disabled"] = False
     save_users(users)
-    append_audit("reset-password", alias)
+    append_audit("reset-password", alias, actor=audit_actor, source=audit_source)
     return {"user": alias}
 
 
-def disable_user(alias):
+def disable_user(alias, audit_actor="local-admin", audit_source="aidev-admin"):
     ensure_data_dir()
     users = load_users()
     if alias not in users:
         raise PlatformError("admin.user_missing", f"user does not exist: {alias}")
     users[alias]["disabled"] = True
     save_users(users)
-    append_audit("disable-user", alias)
+    append_audit("disable-user", alias, actor=audit_actor, source=audit_source)
     return {"user": alias}
 
 
@@ -172,13 +172,18 @@ def authenticate(alias, password):
     return hmac.compare_digest(password_digest(password, salt), expected)
 
 
-def append_audit(action, alias):
+def append_audit(action, alias, actor="local-admin", source="aidev-admin"):
+    """管理动作审计（追加写 service-audit.jsonl）。
+
+    T23/REQ-5：远程通道动作 actor=操作 operator 本人、source="api"；本地
+    aidev-admin 动词面保持缺省 actor=local-admin、source="aidev-admin" 不回归。
+    """
     entry = {
         "timestamp": utc_now(),
         "action": action,
         "user": alias,
-        "actor": "local-admin",
-        "source": "aidev-admin",
+        "actor": actor,
+        "source": source,
     }
     append_jsonl(audit_path(), [entry])
     return entry

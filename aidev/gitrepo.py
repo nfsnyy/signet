@@ -115,8 +115,14 @@ def commit_paths(repository, paths, message, push=False):
     paths = sorted({Path(path).as_posix() for path in paths})
     auto_push = (Path(repository) / PROJECT_MARKER).is_file()
     lock_path = git_commit_lock(repository)
+
+    def list_paths(arguments):
+        # T23：非 ASCII 路径（如 design/中文名.md）在 git 默认 core.quotepath=true
+        # 下以八进制转义加引号输出，与传入 paths 比对必误判越集；列路径命令统一关闭。
+        return run_git(repository, ["-c", "core.quotepath=false", *arguments])
+
     try:
-        staged = run_git(repository, ["diff", "--cached", "--name-only"]).stdout
+        staged = list_paths(["diff", "--cached", "--name-only"]).stdout
         if staged.strip():
             raise OperationalError(
                 "git.staged_changes_present",
@@ -126,7 +132,7 @@ def commit_paths(repository, paths, message, push=False):
         pre_head_result = run_git(repository, ["rev-parse", "HEAD"], check=False)
         pre_head = pre_head_result.stdout.strip() if pre_head_result.returncode == 0 else None
         run_git(repository, ["add", "--", *paths])
-        changed = run_git(repository, ["diff", "--cached", "--name-only", "--", *paths]).stdout.splitlines()
+        changed = list_paths(["diff", "--cached", "--name-only", "--", *paths]).stdout.splitlines()
         if not changed:
             if push or auto_push:
                 _push_origin_main(repository, paths, pre_head)
@@ -134,7 +140,7 @@ def commit_paths(repository, paths, message, push=False):
         if any(path not in paths for path in changed):
             raise OperationalError("git.invalid_commit_scope", "refusing to commit files outside the allowed set")
         run_git(repository, ["commit", "--only", "-m", message, "--", *paths])
-        committed = run_git(repository, ["show", "--pretty=", "--name-only", "HEAD"]).stdout.splitlines()
+        committed = list_paths(["show", "--pretty=", "--name-only", "HEAD"]).stdout.splitlines()
         if any(path not in paths for path in committed if path.strip()):
             raise OperationalError("git.invalid_commit_scope", "commit contains files outside the allowed set")
         if push or auto_push:

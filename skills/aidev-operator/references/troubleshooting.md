@@ -16,5 +16,5 @@
 | `client.api_incompatible` / `client.version_probe_failed` | 新 CLI 连旧服务端（版本协商拒绝）——重启服务加载新代码，或确认两端版本匹配 |
 | 共享 HOME client.json 被覆盖 | 每次 CLI 前重新 login（本机多 session 并行固有坑）；Windows 下私有 HOME 要覆盖 USERPROFILE（Path.home() 不读 HOME） |
 | sigt 验签失败（agent 报来） | 基本是复制折行——重铸重发（见 command-templates.md「sigt 重铸」），内容不变 |
-| `ship.platform_repo_required` | 未 export SIGNET_PLATFORM_REPO |
+| `ship.code_repo_required` | 未 export SIGNET_CODE_REPO（迁移期旧名 SIGNET_PLATFORM_REPO 兼容） |
 | 8000 端口杀不掉（Git Bash `kill` 报 No such process 但端口仍占用） | Windows 原生进程用 `taskkill //PID <pid> //F`（Git Bash 里 kill 对非 MSYS 进程无效） |

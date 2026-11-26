@@ -59,6 +59,12 @@ class OperatorSkillDriftTests(unittest.TestCase):
     def setUpClass(cls):
         cls.text = SKILL_PATH.read_text(encoding="utf-8")
         _, cls.body = parse_frontmatter(cls.text)
+        # T23：skill 文档面 = 正文 + references/（低频参考瘦身外移后的完整断言面；
+        # token 被从文档面删除仍红，断言强度不降）。
+        references_dir = SKILL_PATH.parent / "references"
+        cls.doc_face = cls.body + "\n" + "\n".join(
+            path.read_text(encoding="utf-8") for path in sorted(references_dir.glob("*.md"))
+        )
 
     def test_operator_verbs_match_cli(self):
         implemented = cli_verbs("operator")
@@ -81,11 +87,11 @@ class OperatorSkillDriftTests(unittest.TestCase):
 
     def test_sigt_machinery_documented(self):
         for token in ("/claims", "mint_sigt", "handoff_token", "单行勿折行"):
-            self.assertIn(token, self.body)
+            self.assertIn(token, self.doc_face)
 
     def test_card_template_sections_documented(self):
         for token in ("角色", "入场", "输入材料", "收尾协议"):
-            self.assertIn(token, self.body)
+            self.assertIn(token, self.doc_face)
 
     def test_reconcile_checklist_documented(self):
         for token in ("一案一行", "sha256", "__pycache__"):

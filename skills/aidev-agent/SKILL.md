@@ -42,7 +42,7 @@ whenToUse: 当任务位于 aidev 工作区（目录里含 task.md、AGENTS.md、
 | `handoff-inspect` | 纯本地解析并验签 handoff 能力令牌（sigt），输出 v/task/actor/repo 与 valid，不联网 | `<令牌>`（位置参数） | 读本机 `~/.signet/server-secret` |
 | `health` | 检查平台服务连通性（只读探针） | 无 | 无 |
 
-operator 面动词（`init-repository/init-task/freeze/refreeze/sync/verify/reject/close/ship/void/adjudicate/veto/inbox/login`）**不是你用的**，不要尝试调用。
+operator 面动词（`init-repository/init-task/freeze/refreeze/sync/verify/reject/close/ship/void/adjudicate/veto/inbox/login/user-create/user-disable/user-reset-password/user-list/sigt-reissue/doc-get/doc-put`）**不是你用的**，不要尝试调用。
 
 ## 1.1 登录与凭据（T2 起）
 
