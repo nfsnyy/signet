@@ -72,6 +72,8 @@ class ExecutionAndBaselineTests(WorkflowTestCase):
         return repository, workspace, task_id, spec_id
 
     def test_verify_execute_uses_frozen_assets_and_writes_machine_evidence(self):
+        # T24/REQ-6（AC-01）：verify --execute = operator 本机执行+上传——用例在 CLI
+        # 侧净室执行（冻结资产副本，工作区污染不生效），结果与证据字节上传后服务端落账。
         artifacts = self.write_executable_contract(
             "execute-success",
             "from pathlib import Path; print('fixture-ok:' + Path('fixtures/hello.txt').read_text().strip())",
@@ -94,9 +96,13 @@ class ExecutionAndBaselineTests(WorkflowTestCase):
         events = [json.loads(line) for line in (Path(repository) / "events" / "events.jsonl").read_text(encoding="utf-8").splitlines() if line]
         initial = [event for event in events if event.get("task_id") == task_id and event["event_type"] == "verification.initial"]
         self.assertEqual(1, len(initial))
-        self.assertTrue(initial[0]["payload"]["executed"])
+        # 服务端零用例执行（executed=False）；落账证据项为 path+sha256 形态（无 content 键）。
+        self.assertFalse(initial[0]["payload"]["executed"])
+        evidence_items = initial[0]["payload"]["results"]["results"][0]["evidence"]
+        self.assertTrue(any(item.get("path") and item.get("sha256") and "content" not in item for item in evidence_items))
 
     def test_verify_execute_rejects_failed_case_and_tampered_asset(self):
+        # 失败用例：本机执行后结果如实上传，服务端 verify.failed_criterion 拒落账。
         failure_artifacts = self.write_executable_contract("execute-failure", "print('actual-output')", "expected-missing")
         repository, workspace, task_id, _ = self.prepare_implemented_task("execute-failure", failure_artifacts)
         failed = self.operator([
@@ -106,6 +112,8 @@ class ExecutionAndBaselineTests(WorkflowTestCase):
         self.assertEqual("verify.failed_criterion", failed["error"]["code"])
         self.assertEqual("Implemented", self.task_state(repository, task_id))
 
+        # 冻结资产篡改：本机执行器在取数核验链（contract.assets 逐件 sha256）上
+        # 本地中止（verify.asset_hash_mismatch），不上传、任务保持 Implemented。
         tamper_artifacts = self.write_executable_contract(
             "execute-tamper",
             "print('fixture-ok:' + Path('fixtures/hello.txt').read_text().strip())",
@@ -120,6 +128,7 @@ class ExecutionAndBaselineTests(WorkflowTestCase):
             "--execute", "--verifier", "verifier-a", "--confirmed-by", "owner",
         ], expected_exit=2)
         self.assertEqual("verify.asset_hash_mismatch", tampered["error"]["code"])
+        self.assertEqual("Implemented", self.task_state(repository, task_id))
 
     def test_baseline_freeze_saves_evidence_and_failed_baseline_is_cleaned(self):
         repository, _ = self.init_state_repo()

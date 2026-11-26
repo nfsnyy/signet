@@ -310,10 +310,26 @@ def _require_mutable_project(project_id):
     return record
 
 
-def _apply_git_credential_events(project_id, credentials, actor):
+def _apply_git_credential_events(app_ctx, project_id, credentials, actor):
     """configure 携 credentials upsert：写凭据存储 + git_credential.configured
-    三键事件落该项目状态仓（秘密只写不回显）。"""
+    三键事件落该项目状态仓（秘密只写不回显）。
+
+    T24/REQ-7（AC-08）：内置项目事件直落服务端绑定仓（绑定仓即内置项目权威
+    状态仓，无服务端克隆、无 push）；非内置项目维持克隆通道。"""
     record = _require_project_record(project_id)
+    if record.get("builtin") and app_ctx.configured_repo:
+        repository = app_ctx.configured_repo
+        for repo_kind in ("state", "code"):
+            entry = credentials.get(repo_kind)
+            if entry is None:
+                continue
+            project_store.upsert_git_credential(project_id, repo_kind, entry["method"], entry.get("secret"))
+            record_pat_event(repository, "git_credential.configured", actor, {
+                "project_id": project_id,
+                "repo": repo_kind,
+                "method": entry["method"],
+            })
+        return
     repository = project_store.ensure_clone(record)
     project_store.fetch_integrate(repository, for_write=True)
     for repo_kind in ("state", "code"):

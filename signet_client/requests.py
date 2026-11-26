@@ -170,11 +170,17 @@ def build_request(role, arguments, sigt_payload=None):
             files.append(("manual_results", *read_upload(arguments.manual_results, "verify.invalid_manual_results")))
         if arguments.review_report:
             files.append(("review_report", *read_upload(arguments.review_report, "verify.ai_review_invalid_report")))
+        # T24/REQ-6（AC-03）：results 模式证据字节随件上传（按 filename 与 results 引用匹配）。
+        for path in getattr(arguments, "evidence", None) or []:
+            files.append(("evidence", *read_upload(path, "verify.evidence_missing")))
         return "POST", f"/api/tasks/{arguments.task_id}/verify", fields, files
     if command == "reject":
         fields = present({"repo": arguments.repo, "category": arguments.category, "reason": arguments.reason, "actor": arguments.actor, "workspace": arguments.workspace, "push": str(arguments.push).lower()})
         return "POST", f"/api/tasks/{arguments.task_id}/reject", fields, None
     if command == "close":
+        # T24/REQ-7（AC-09）：close --ship 全项目零本机 git 副作用——服务端推送已验收
+        # merge_commit；ship_commit/ship_fingerprint 输入全项目退役（服务端 400
+        # close.ship_input_forbidden），客户端不再携带。
         fields = present({
             "repo": arguments.repo,
             "decision": arguments.decision,
@@ -182,8 +188,6 @@ def build_request(role, arguments, sigt_payload=None):
             "reason": arguments.reason,
             "push": str(arguments.push).lower(),
             "ship": str(getattr(arguments, "ship", False)).lower(),
-            "ship_commit": getattr(arguments, "ship_commit", None),
-            "ship_fingerprint": getattr(arguments, "ship_fingerprint", None),
         })
         return "POST", f"/api/tasks/{arguments.task_id}/close", fields, None
     if command == "void":

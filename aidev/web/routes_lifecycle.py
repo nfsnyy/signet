@@ -201,11 +201,14 @@ async def sync_endpoint(request: Request):
 async def verify_endpoint(request: Request, task_id: str):
     # 手工解析（替代 FastAPI Form 注入）：AC-01/02 要求 repo 路径形态/未知逻辑 id
     # 的拒绝先于字段校验——JSON 体（编排探针）与 multipart 表单（CLI）双形态。
+    # T24/REQ-6（AC-03）：multipart 增 evidence 文件通道——按 filename 与 results
+    # 引用匹配，逐件 sha256 核验后落 tasks/<id>/verification/ 入账。
     app_ctx = request.app.state.app_ctx
     content_type = request.headers.get("content-type", "")
     temporary = tempfile.TemporaryDirectory(prefix="aidev-web-verify-")
     try:
         results_file = manual_results_file = review_report_file = None
+        evidence_uploads = {}
         if content_type.startswith("multipart/form-data"):
             form = await request.form()
             repo = form.get("repo")
@@ -230,6 +233,10 @@ async def verify_endpoint(request: Request, task_id: str):
                     manual_results_file = str(path)
                 else:
                     review_report_file = str(path)
+            for upload in form.getlist("evidence"):
+                if upload is None or not getattr(upload, "filename", None):
+                    continue
+                evidence_uploads[Path(upload.filename).name] = upload.file.read()
         elif content_type.startswith("application/json"):
             payload = await request.json()
             if not isinstance(payload, dict):
@@ -244,15 +251,14 @@ async def verify_endpoint(request: Request, task_id: str):
             repo = verifier = confirmed_by = None
             execute = push = reverify = False
 
-        # 异步接线（T16 返场修复）：verify_task 为阻塞调用（git 提交 + 净室子
-        # 进程用例会回调本服务），必须经线程池执行——留在事件循环会使净室用例
-        # 的 HTTP 自回调全部超时。校验顺序保持 repo 解析 → 字段校验 → verify_task。
+        # 异步接线（T16 返场修复）：verify_task 为阻塞调用（git 锁/提交/远端对账），
+        # 经线程池执行保持事件循环可响应。校验顺序保持 repo 解析 → 字段校验 → verify_task。
         def run_verify():
             repository = operator_repo(app_ctx, repo)
             if not verifier or not confirmed_by:
                 raise PlatformError("request.invalid", "verifier and confirmed_by are required")
             check_actor_aliases({"verifier": verifier, "confirmed_by": confirmed_by})
-            return verify_task(repository, task_id, verifier, confirmed_by, results_file, execute, manual_results_file, push, review_report_file=review_report_file, reverify=reverify)
+            return verify_task(repository, task_id, verifier, confirmed_by, results_file, execute, manual_results_file, push, review_report_file=review_report_file, reverify=reverify, evidence_uploads=evidence_uploads)
 
         result = await run_in_threadpool(run_verify)
         return ok(result)

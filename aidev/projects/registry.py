@@ -5,7 +5,6 @@
 """
 
 import json
-import os
 import re
 import threading
 from pathlib import Path
@@ -121,16 +120,22 @@ def _origin_url(repository):
 # ---------------------------------------------------------------------------
 
 def builtin_record(bound_repository):
-    """绑定仓登记为内置项目（project.json 的 project_id；缺文件返回 None）。"""
+    """绑定仓登记为内置项目（project.json 的 project_id；缺文件返回 None）。
+
+    T24/REQ-7（AC-05）：code_repo 取状态仓 project.json 的 code_repo 字段（URL
+    形态远端，服务端 ship 推送目标；带外运维写入，缺省为空=无代码闭环）；
+    SIGNET_PLATFORM_REPO 本机路径不再充当推送目标（仅服务 distribution/runner
+    定位被测代码）。"""
     document = _read_project_json(bound_repository)
     if not document or not isinstance(document.get("project_id"), str) or not document["project_id"].strip():
         return None
     origin = _origin_url(bound_repository)
+    code_repo = document.get("code_repo")
     return {
         "project_id": document["project_id"],
         "name": document.get("name") or Path(bound_repository).resolve().name,
         "state_repo": origin or str(Path(bound_repository).resolve()),
-        "code_repo": os.environ.get("SIGNET_PLATFORM_REPO") or "",
+        "code_repo": code_repo.strip() if isinstance(code_repo, str) else "",
         "status": "active",
         "owner": document.get("owner") or "",
         "created_at": document.get("created_at") or utc_now(),

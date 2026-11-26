@@ -9,7 +9,6 @@ T22/REQ-1（AC-03）：login 前先经 EP-02 核对 API 协议版本，不兼容
 import argparse
 import json
 import sys
-import urllib.parse
 from pathlib import Path
 
 from .credentials import (
@@ -29,7 +28,7 @@ from .http import (
     perform,
     resolve_base_url,
 )
-from .legacy_ship import local_git_ship, run_local_ship
+from .local_verify import run_local_verify
 from .projection import handoff_claim, land_projection, pull_package
 from .requests import build_request
 
@@ -79,7 +78,10 @@ def parser_for(role):
         verify.add_argument("--repo")
         verify.add_argument("--task-id", required=True)
         verify.add_argument("--results")
-        verify.add_argument("--execute", action="store_true")
+        verify.add_argument("--execute", action="store_true",
+                            help="本机执行冻结用例并上传结果/证据（T24/REQ-6 新语义：服务端净室已退役）")
+        verify.add_argument("--evidence", action="append",
+                            help="results 模式随件上传的证据文件（按 filename 与 results 引用匹配，可重复）")
         verify.add_argument("--manual-results")
         verify.add_argument("--review-report")
         verify.add_argument("--reverify", action="store_true",
@@ -102,10 +104,7 @@ def parser_for(role):
         close.add_argument("--actor", required=True)
         close.add_argument("--reason")
         close.add_argument("--push", action="store_true")
-        close.add_argument("--ship", action="store_true", help="close 后顺带执行本机 ship（git add/commit/push 由 CLI 在 SIGNET_PLATFORM_REPO 工作副本执行）")
-        ship_parser = subparsers.add_parser("ship")
-        ship_parser.add_argument("--repo")
-        ship_parser.add_argument("--task-id", required=True)
+        close.add_argument("--ship", action="store_true", help="close 后由服务端推送已验收 merge_commit 入库（T24/REQ-7：本机零 git 副作用）")
         void = subparsers.add_parser("void")
         void.add_argument("--repo")
         void.add_argument("--task-id", required=True)
@@ -356,38 +355,8 @@ def run(role, argv=None):
             return incompatible
     if role == "agent" and arguments.command == "claim" and getattr(arguments, "handoff", None):
         return handoff_claim(arguments)
-    if role == "operator" and arguments.command == "ship":
-        return run_local_ship(arguments)
-    if role == "operator" and arguments.command == "close" and getattr(arguments, "ship", False):
-        # close --ship 双通道（T18 REQ-7）：显式 --repo 命中非内置项目时由服务端推送
-        # 已验收 merge_commit（本机零 git 副作用，不调用 local_git_ship）；省略 repo
-        # 或内置项目维持本机兼容路径（AC-07：先跑本机 ship，commit_hash 随 close 落账）。
-        repo = getattr(arguments, "repo", None)
-        if repo:
-            try:
-                project_status, project_payload = perform(
-                    "GET",
-                    resolve_base_url() + f"/api/projects/{urllib.parse.quote(str(repo), safe='')}",
-                    token=resolve_token(),
-                )
-            except ServiceUnavailable as error:
-                return emit_unreachable(error)
-            project = (
-                (project_payload.get("result") or {}).get("project")
-                if isinstance(project_payload, dict)
-                else None
-            )
-            if project_status == 200 and isinstance(project, dict):
-                if not project.get("builtin"):
-                    return dispatch_request(role, arguments, sigt=None, sigt_payload=None)
-            else:
-                # 未知 repo id / 路径形态：本机零副作用，交由服务端按钉名码拒绝。
-                return dispatch_request(role, arguments, sigt=None, sigt_payload=None)
-        try:
-            ship_result = local_git_ship(arguments.task_id)
-        except ClientInputError as error:
-            return emit_error(error.code, error.message, error.details, error.exit_code)
-        arguments.ship_commit = ship_result.get("commit_hash")
-        arguments.ship_fingerprint = None
-        return dispatch_request(role, arguments, sigt=None, sigt_payload=None)
+    if role == "operator" and arguments.command == "verify" and getattr(arguments, "execute", False):
+        # T24/REQ-6（AC-01）：verify --execute 语义迁移为 operator 本机执行+上传
+        # （服务端 execute=true 一律 400 verify.execute_retired）。
+        return run_local_verify(arguments)
     return dispatch_request(role, arguments, sigt=None, sigt_payload=None)

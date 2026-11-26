@@ -1,11 +1,11 @@
 """T16 返场回归：async verify 接线期间服务仍可响应其它请求。
 
-verify_endpoint 是 async def，而 verify_task 为阻塞调用（git 提交 + 净室子
-进程用例会经 HTTP 回调同一服务）。阻塞调用留在事件循环时，净室用例的自回调
-全部 TimeoutError（operator 复现：verify-debug-service/*.log 全超时，直接运行
-器 verify-debug/*.log 13/13 绿）。本测试经真实 HTTP CLI 走 verify --execute，
-冻结用例子进程回调 /api/health，只有在事件循环可响应时才能通过——回归防护
-verify_task 必须经线程池执行（run_in_threadpool）。
+T24/REQ-6 起 verify --execute 迁移为 operator 本机执行+上传（服务端净室退役，
+execute=true 一律 400 verify.execute_retired）：冻结用例改在 CLI 侧子进程执行，
+其 HTTP 自回调（/api/health）经 SIGNET_BASE_URL 指向被测服务——本测试经真实
+HTTP CLI 走 verify --execute，用例回调只有在服务事件循环可响应时才能通过，
+同时覆盖「本机执行 → 上传 → 服务端落账 Verified」全链路。服务端 verify_task
+仍经线程池执行（run_in_threadpool，T16 接线不变）。
 """
 
 import os
@@ -19,8 +19,8 @@ except ImportError:
 class VerifyAsyncWiringTests(WorkflowTestCase):
     def test_verify_execute_keeps_service_responsive(self):
         repository, _ = self.init_state_repo()
-        # 净室 allowed_env 从服务端进程环境取值；测试服务为同进程线程内实例，
-        # 此处注入自引用地址供用例子进程回调。
+        # 净室 allowed_env 从 CLI 进程环境取值（T24 起用例在 CLI 侧本机执行）；
+        # 测试服务为同进程线程内实例，此处注入自引用地址供用例子进程回调。
         os.environ["SIGNET_BASE_URL"] = start_service()
         workspace, task_id, _ = self.init_task(repository, "verify-async")
         artifacts = self.path("verify-async-artifacts")
@@ -58,8 +58,8 @@ class VerifyAsyncWiringTests(WorkflowTestCase):
         self.claim_and_sync(repository, workspace)
         self.submit_and_sync(repository, workspace)
         self.assertEqual("Implemented", self.task_state(repository, task_id))
-        # 经真实 HTTP（CLI 子进程 → async verify_endpoint → 线程池 verify_task）：
-        # 净室用例的 HTTP 自回调只有在事件循环未被阻塞时才能成功。
+        # 经真实 HTTP（CLI 子进程本机执行用例 → 上传 → async verify_endpoint →
+        # 线程池 verify_task）：用例的 HTTP 自回调只有在服务可响应时才能成功。
         self.operator([
             "verify", "--repo", repository, "--task-id", task_id, "--execute",
             "--verifier", "verifier-a", "--confirmed-by", "owner",

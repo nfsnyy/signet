@@ -1,4 +1,5 @@
-"""T18 multi-project-support（REQ-5~REQ-8）：非内置项目代码闭环模块。
+"""T18 multi-project-support（REQ-5~REQ-8）+ T24 remote-verify-and-ship（REQ-6/7）：
+全项目统一代码闭环模块（内置项目同机制）。
 
 钉扎存储（服务端数据目录，与 clones/ 分离，不进任何状态仓）：
 
@@ -9,7 +10,7 @@
   提供给机器验收、异源评审与人工走查；
 - ``code-verifications/<task_id>/merge``   预合并 worktree（仅服务端使用）。
 
-凭据纪律（AC-04）：全部远端操作显式 ``repo_kind="code"`` 走项目服务端 code 凭据
+凭据纪律（AC-04/AC-08）：全部远端操作显式 ``repo_kind="code"`` 走项目服务端 code 凭据
 （state/code 不混用）；本模块不调用平台仓本机 ship 入口、不做全量暂存收集；
 服务端 code 秘密不进响应/报告/事件/任务包/日志。
 """
@@ -60,18 +61,40 @@ def merge_worktree_dir(task_id):
     return verification_dir(task_id) / "merge"
 
 
-def code_task_context(repository, metadata):
-    """非内置项目且 spec_pin 非空的实现任务 → (project_id, record)；否则 None。
+def task_code_class(metadata, record):
+    """T24/REQ-7：任务 code_class 生效判定——frontmatter 显式旗标优先；旗标缺席时
+    迁移口径：非内置项目已钉扎任务按 T18 现行语义视同 true，内置任务视同 false
+    （在飞任务行为不变）。"""
+    flag = metadata.get("code_class")
+    if flag is not None:
+        return bool(flag)
+    return not record.get("builtin")
 
-    code_repo_id 恰为任务所属 project_id（T17 一项目一 code_repo）；内置项目与
-    未钉扎起草任务返回 None（维持五段报告与旧验收路径）。"""
+
+def explicit_code_class(metadata):
+    """AC-04 attest 必填判定：仅显式 code_class=true 的任务 verify results 必携
+    code 段；迁移视同 true 的任务（旗标缺席） attest 随件则对账、缺席走 T18 旧径。"""
+    return isinstance(metadata, dict) and metadata.get("code_class") is True
+
+
+def code_task_context(repository, metadata):
+    """代码闭环任务（spec_pin 非空且 code_class 生效为真）→ (project_id, record)；否则 None。
+
+    code_repo_id 恰为任务所属 project_id（T17 一项目一 code_repo）；T24/REQ-7 起内置
+    项目同机制（record.code_repo 取状态仓 project.json 的 code_repo 字段，URL 形态
+    远端，缺席即无推送目标、不成闭环）；code_class=false 与未钉扎起草任务返回 None
+    （维持五段报告与无 ship close）。"""
     if not isinstance(metadata, dict) or not isinstance(metadata.get("spec_pin"), dict):
         return None
     project_id = project_store.project_id_for_repository(repository)
     if not project_id:
         return None
     record = project_store.get_project(project_id)
-    if not record or record.get("builtin"):
+    if not record:
+        return None
+    if not task_code_class(metadata, record):
+        return None
+    if record.get("builtin") and not str(record.get("code_repo") or "").strip():
         return None
     return project_id, record
 
@@ -152,8 +175,11 @@ def _remote_branch_exists(mirror, project_id, branch, error_prefix):
 
 
 def fetch_branch(mirror, project_id, branch, error_prefix):
-    """明确 refspec 只 fetch 所报分支到镜像远端命名空间，返回分支 tip。"""
-    refspec = f"refs/heads/{branch}:refs/remotes/origin/{branch}"
+    """明确 refspec 只 fetch 所报分支到镜像远端命名空间，返回分支 tip。
+
+    强制（+）更新：镜像是远端的只读缓存，远端被 force 移动（如恢复回卷）时镜像
+    跟随远端，不接受非快进拒绝（T24/AC-07 恢复后重试语义）。"""
+    refspec = f"+refs/heads/{branch}:refs/remotes/origin/{branch}"
     result = _git(
         mirror,
         [*_auth_args(), "fetch", "origin", refspec],
@@ -174,10 +200,11 @@ def fetch_branch(mirror, project_id, branch, error_prefix):
 
 
 def fetch_main(mirror, project_id):
-    """fetch origin/main 到远端命名空间，返回当前主分支基点。"""
+    """fetch origin/main 到远端命名空间（强制跟随远端，镜像语义同 fetch_branch），
+    返回当前主分支基点。"""
     result = _git(
         mirror,
-        [*_auth_args(), "fetch", "origin", "refs/heads/main:refs/remotes/origin/main"],
+        [*_auth_args(), "fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"],
         env=_code_env(project_id),
         check=False,
     )
@@ -296,6 +323,61 @@ def reconcile_source_pin(metadata, submitted_code):
     return pinned
 
 
+def check_verify_attestation(metadata, document):
+    """T24/REQ-6（AC-04）：verify results 的 code attest 段对账（fail-closed）。
+
+    - 显式 code_class=true 任务：results 必携恰三键 code 段（code_repo_id/branch/
+      commit_hash 非空字符串），缺失/畸形 → 400 verify.code_attestation_required；
+      与 code_submission 钉扎不符 → 409 verify.source_commit_mismatch（保持
+      Implemented、零验收事件）。
+    - 迁移视同 true 的任务（旗标缺席）：attest 随件则同口径对账，缺席走 T18 旧径
+      （在飞任务行为不变）。
+    - 非代码任务携 code 段 → 400 verify.code_attestation_unexpected（防误钉）。
+    返回随件 attest（无则 None）；拒绝先于任何账本副作用。"""
+    attestation = document.get("code")
+    required = explicit_code_class(metadata)
+    if attestation is None:
+        if required:
+            raise PlatformError(
+                "verify.code_attestation_required",
+                "代码任务 results 必须携带 code 段（恰三键 code_repo_id/branch/commit_hash）声明本机实测 commit",
+            )
+        return None
+    if not isinstance(attestation, dict) or set(attestation.keys()) != set(CODE_FIELDS) or any(
+        not isinstance(attestation.get(field), str) or not attestation[field].strip() for field in CODE_FIELDS
+    ):
+        if required or metadata.get("code_submission"):
+            raise PlatformError(
+                "verify.code_attestation_required",
+                "results code 段必须恰三键 code_repo_id/branch/commit_hash 且为非空字符串",
+            )
+        raise PlatformError(
+            "verify.code_attestation_unexpected",
+            "非代码任务 results 不得携带 code 段（fail-closed 防误钉）",
+        )
+    pinned = metadata.get("code_submission")
+    if not isinstance(pinned, dict):
+        if required:
+            raise PlatformError(
+                "verify.source_commit_mismatch",
+                "任务元数据缺少 code_submission 钉扎，attest 无对账基准",
+                exit_code=3,
+                details={"attestation": attestation},
+            )
+        raise PlatformError(
+            "verify.code_attestation_unexpected",
+            "非代码任务 results 不得携带 code 段（fail-closed 防误钉）",
+        )
+    if attestation != pinned:
+        raise PlatformError(
+            "verify.source_commit_mismatch",
+            "results code attest 与 code_submission 钉扎不符",
+            exit_code=3,
+            details={"attestation": attestation, "code_submission": pinned},
+        )
+    return dict(attestation)
+
+
 def _remove_worktrees(mirror, task_id):
     """移除本任务陈旧验收 worktree 元数据并重建（AC-03：不复用任何旧副本）。"""
     for path in (source_worktree_dir(task_id), merge_worktree_dir(task_id)):
@@ -386,7 +468,7 @@ def close_push_state(project_id, merge_commit, target_base):
     mirror = ensure_mirror(project_id, record)
     fetch = _git(
         mirror,
-        [*_auth_args(), "fetch", "origin", "refs/heads/main:refs/remotes/origin/main"],
+        [*_auth_args(), "fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"],
         env=_code_env(project_id),
         check=False,
     )

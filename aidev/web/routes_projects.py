@@ -55,23 +55,37 @@ def projects_configure_endpoint(request: Request, project_id: str, body: Project
     context = credentials(request)
     if context["kind"] != "user":
         raise AuthorizationError("authz.session_required", "项目配置只认本人登录，任何凭证不可代配置")
-    record = _require_mutable_project(project_id)
+    body = body or ProjectConfigureBody()
+    record = _require_project_record(project_id)
+    if record.get("builtin"):
+        # T24/REQ-7（AC-08）：内置项目放行 credentials-only（凭据供给属日常运维，
+        # 服务端 ship 的 code 凭据来源）；name/state_repo/code_repo 改绑与停用维持
+        # project.builtin_protected（凭据放行不扩大内置保护面）。
+        name_change = body.name is not None and str(body.name).strip() and body.name != record.get("name")
+        if name_change or body.state_repo is not None or body.code_repo is not None:
+            raise PlatformError(
+                "project.builtin_protected",
+                "内置项目（平台自身）不可改绑 name/state_repo/code_repo；仅放行 credentials-only 配置",
+                exit_code=3,
+                details={"project_id": project_id},
+            )
+    else:
+        record = _require_mutable_project(project_id)
+        if body.state_repo is not None or body.code_repo is not None:
+            raise PlatformError(
+                "project.repo_immutable",
+                "首版不支持 state_repo/code_repo 改绑：仓库地址一经注册不可变更（零副作用）",
+            )
     if record.get("status") == "disabled":
         raise PlatformError("project.disabled", f"project {project_id} is disabled; configure is rejected", exit_code=3)
-    body = body or ProjectConfigureBody()
-    if body.state_repo is not None or body.code_repo is not None:
-        raise PlatformError(
-            "project.repo_immutable",
-            "首版不支持 state_repo/code_repo 改绑：仓库地址一经注册不可变更（零副作用）",
-        )
     fields = []
-    if body.name is not None and str(body.name).strip() and body.name != record.get("name"):
+    if not record.get("builtin") and body.name is not None and str(body.name).strip() and body.name != record.get("name"):
         record = project_store.update_project(project_id, name=str(body.name).strip())
         fields.append("name")
     supplied_credentials = body.credentials or {}
     if supplied_credentials:
         cleaned = project_store.validate_supplied_credentials(supplied_credentials)
-        _apply_git_credential_events(project_id, cleaned, context["actor"])
+        _apply_git_credential_events(app_ctx, project_id, cleaned, context["actor"])
         fields.extend(f"credentials.{kind}" for kind in ("state", "code") if kind in cleaned)
     if fields:
         _platform_event(app_ctx, "project.configured", context["actor"], {

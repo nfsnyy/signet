@@ -139,12 +139,14 @@ def read_norm(platform_root, name):
 
 CLIENT_ENTRY_FILES = ("aidev-agent.py", "aidev-operator.py")
 CLIENT_PACKAGE_DIRECTORY = "signet_client"
+# T24/REQ-6/7（AC-01/AC-09）：钉名成员清单同步——本机执行器 local_verify.py 入包
+# （verify --execute 本机执行+上传），本机 ship 模块 legacy_ship.py 退役出包。
 CLIENT_PACKAGE_MEMBERS = (
     "__init__.py",
     "http.py",
     "credentials.py",
     "projection.py",
-    "legacy_ship.py",
+    "local_verify.py",
     "requests.py",
     "cli.py",
 )

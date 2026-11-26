@@ -37,7 +37,7 @@ whenToUse: 当用户要求我接管/执行 operator 职责（建任务、出派�
 | "登记/记下来" | enhancement/backlog 容器登记 | 排期、立项 |
 | "立项/派活/办/都立项吧" | init-task + 派活卡（范围=需求已确认条目，范围分类疑问报人裁定） | 自定范围、提前签发 sigt 以外的扩权 |
 | "签" | 摘要所述对象的 freeze/refreeze H1/H2 | 对摘要内容的任何变更 |
-| "确认"（close 摘要后） | close --push --ship（ship=工作树现状） | 摘要外改动 |
+| "确认"（close 摘要后） | close --push --ship（ship=服务端推送已验收 merge_commit 入库） | 摘要外改动 |
 | "通过"（走查后） | 写 manual-results 继续验收 | 代用户勾选需求条目 |
 
 词表未覆盖或语义含糊时，停下来问，不要用"应该就是这个意思"补齐。
@@ -75,10 +75,9 @@ whenToUse: 当用户要求我接管/执行 operator 职责（建任务、出派�
 | `freeze` | 冻结三件套（Draft 或 **Implemented 未钉扎**均可——起草流程标准门；内容上传+随件摘要） | `--task-id`、`--acceptance-card`、`--contract`、`--mapping`、`--h1-actor`、`--h2-actor`（`--repo` 逻辑 id 可省略；`--workspace` 纯本地可选，成功后自动落投影） |
 | `refreeze` | 重冻新版本（须已钉扎；带 reason 留痕） | 同 freeze + `--reason` |
 | `sync` | 受理工作区 outbox 提案（内容上传：proposals+证据随件）并刷新投影（客户端拉取落盘） | `--workspace`（可多个，本地）、`--actor`、`--push`（`--repo` 逻辑 id 可省略） |
-| `verify` | 执行/录入验收（`--execute` 净室跑冻结用例 + `--manual-results` 人审结果） | `--task-id`、`--verifier`、`--confirmed-by` |
+| `verify` | 执行/录入验收（`--execute` 本机跑冻结用例并上传结果/证据——T24 起服务端净室退役；`--manual-results` 人审结果） | `--task-id`、`--verifier`、`--confirmed-by` |
 | `reject` | 驳回任务（implement/input 分类；input 终态 Void） | `--task-id`、`--category`、`--reason` |
-| `close` | 关闭任务（accept → Done；`--ship` 一步双仓入库） | `--task-id`、`--decision`、`--actor`、`--push`、`--ship` |
-| `ship` | 平台仓入库（目录六要素；close --ship 内含） | 见 §7 |
+| `close` | 关闭任务（accept → Done；`--ship` 由服务端推送已验收 merge_commit 入库，本机零 git 副作用） | `--task-id`、`--decision`、`--actor`、`--push`、`--ship` |
 | `void` | 作废任务 | `--task-id`、`--category`、`--reason` |
 | `adjudicate` | 裁决 Blocked 任务（唯一出口：Blocked → Ready） | `--task-id`、`--category`、`--reason` |
 | `veto` | 安全否决（spec 安全闸门） | 见 `--help` |
@@ -99,7 +98,7 @@ agent 面动词（`status`/`claim`/`submit`/`block`/`enhancement`/`collab-send`/
 
 ```bash
 export SIGNET_BASE_URL=http://127.0.0.1:8000
-export SIGNET_PLATFORM_REPO='C:/.../iteration-1'   # 仅 verify/ship 定位被测代码需要
+export SIGNET_PLATFORM_REPO='C:/.../iteration-1'   # 仅 verify --execute 本机执行器/分发定位被测代码需要
 python aidev-agent.py login --user nfsnyy --password '<口令，hints.md/口头约定>'   # 每次必做：共享 HOME 的 client.json 会被其它登录覆盖
 ```
 
@@ -155,7 +154,7 @@ python aidev-agent.py login --user nfsnyy --password '<口令，hints.md/口头�
   - 走查前：对象盘点——清单每条断言所需页面数据是否存在；缺则先造数（优先真实管线：nfsnyy CLI 签临时 PAT → API 建对象 → 走完整流程），造数对象登记 id 清单备清场。
   - 走查中：清单逐条注明数据前提；补一条故意失败路径（错误口令/越权访问），亲看错误信息是否人话。
   - 走查后：清场闸——删造数对象（任务/需求/账号 disable）、吊销临时凭据（revoke 落事件）、清场结果入 close 摘要。
-- close --ship 前给用户 close 摘要（验收结论 + ship 内容 + 影响），"确认"后执行；ship 后核对 task.shipped 的 commit_hash 与平台仓提交一致。
+- close --ship 前给用户 close 摘要（验收结论 + ship 内容 + 影响），"确认"后执行；ship 后核对 task.shipped 的 commit_hash 与服务端推送的 merge_commit 一致（via=server-push）。
 - **验收范围闸（#47）**：验收与驳回只能依据冻结三件套；驳回必须引用具体 AC/case 及失败证据。走查辅助步骤、客户端预装假设或合约外新能力发现不得升格为额外 AC；先举证并向人提出分类建议，范围分类由人裁定。未违反冻结 must 的观察项登记 enhancement/新需求，不挡 verify/close；确需改变当前范围，由人明确决定后走起草/refreeze。
 
 ### 8.1 输出分轨（#32：发给人的 ≠ 发给 agent 的）

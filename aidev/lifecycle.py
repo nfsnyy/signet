@@ -1,7 +1,6 @@
 import hashlib
 import json
 import os
-import time
 from pathlib import Path
 
 from . import codeflow
@@ -18,7 +17,7 @@ from .errors import AuthorizationError, OperationalError, PlatformError
 from .fingerprint import workspace_fingerprint
 from .gitrepo import commit_paths, ensure_repository
 from .jsonio import append_jsonl, read_json, read_jsonl, utc_now
-from .runner import execute_contract_cases, frozen_contract, machine_criterion_results
+from .runner import frozen_contract
 from .service import (
     create_trace_review_task,
     propagate_pin_invalidation,
@@ -40,22 +39,6 @@ def lifecycle_lock(repository):
         raise OperationalError("lifecycle.already_running", "another lifecycle operation holds the repository lock") from error
     os.close(descriptor)
     return lock_path
-
-
-def lifecycle_lock_wait(repository, timeout_seconds=30.0, poll_seconds=0.1):
-    """生命周期锁自旋获取（verify --execute 净室窗口重取用）：净室用例回调的
-    reject/adjudicate/verify 等动词短小临界区，重取时短暂自旋而非立刻 409。"""
-    lock_path = Path(repository) / ".aidev-lifecycle.lock"
-    deadline = time.monotonic() + timeout_seconds
-    while True:
-        try:
-            descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(descriptor)
-            return lock_path
-        except FileExistsError:
-            if time.monotonic() >= deadline:
-                raise OperationalError("lifecycle.already_running", "another lifecycle operation holds the repository lock")
-            time.sleep(poll_seconds)
 
 
 def persist(repository, changed_tasks, events, extra_paths, message, push):
@@ -147,84 +130,64 @@ def validate_verification_results(repository, metadata, document):
         raise PlatformError("verify.safety_veto_manual", "safety-veto criterion cannot be manual-only")
 
 
-def build_executed_document(repository, metadata, verifier, manual_results_file, review_report_file=None):
-    spec_directory, _, mapping = frozen_contract(repository, metadata)
-    card = read_json(spec_directory / "acceptance-card.json")
-    safety_ids = {item.get("criterion_id") for item in card.get("criteria", []) if isinstance(item, dict) and item.get("strength") == "safety-veto"}
-    manual_rows = [row for row in mapping.get("rows", []) if isinstance(row, dict) and row.get("manual") is True]
-    manual_results = {}
-    if safety_ids or manual_rows:
-        if not manual_results_file:
-            raise PlatformError("verify.manual_results_required", "manual criteria or safety-veto rerun results are required")
-        manual_document = load_json_document(manual_results_file, "verify.invalid_manual_results")
-        if manual_document.get("verifier") != verifier:
-            raise PlatformError("verify.actor_mismatch", "manual results verifier must match the verify actor")
-        for result in manual_document.get("results", []):
-            if isinstance(result, dict) and result.get("criterion_id"):
-                manual_results[result["criterion_id"]] = result
-    case_results = execute_contract_cases(repository, metadata)
-    results = machine_criterion_results(case_results, mapping)
-    for result in results:
-        criterion_id = result["criterion_id"]
-        if criterion_id in safety_ids:
-            manual_result = manual_results.get(criterion_id)
-            if not manual_result or not isinstance(manual_result.get("manual_rerun"), dict):
-                raise PlatformError("verify.safety_rerun_required", f"safety-veto manual rerun is required: {criterion_id}")
-            result["manual_rerun"] = manual_result["manual_rerun"]
-    for row in manual_rows:
-        criterion_id = row["criterion_id"]
-        if criterion_id not in manual_results:
-            raise PlatformError("verify.manual_results_required", f"manual criterion result is required: {criterion_id}")
-        results.append(manual_results[criterion_id])
-    document = {"verifier": verifier, "spec_pin": metadata["spec_pin"], "results": results}
-    # AC-01 钉名参数透传：ai_review 阶段输入随执行文档承载，阶段执行（拒签/阻断/
-    # 降级/落账）仍在 verify_task 的 conformance 之后按钉死阶段序进行；未附报告时
-    # 键缺省，文档与现行逐字节一致。
-    if review_report_file:
-        document["_review_report_file"] = review_report_file
-    return document
+def _evidence_reference_items(document):
+    """results 文档中全部 filename 形态证据引用（含 safety-veto manual_rerun 段）。"""
+    items = []
+    for result in document.get("results", []):
+        if not isinstance(result, dict):
+            continue
+        for item in result.get("evidence", []):
+            if isinstance(item, dict) and item.get("filename"):
+                items.append(item)
+        rerun = result.get("manual_rerun")
+        if isinstance(rerun, dict):
+            for item in rerun.get("evidence", []):
+                if isinstance(item, dict) and item.get("filename"):
+                    items.append(item)
+    return items
 
 
-def materialize_machine_evidence(repository, task_id, document):
+def materialize_uploaded_evidence(repository, task_id, document, evidence_uploads):
+    """T24/REQ-6（AC-03）：verify 结果上传的证据字节通道。
+
+    filename 形态引用按名匹配 multipart 随件字节：引用未上传 → 400
+    verify.evidence_missing；字节 sha256 与引用不符 → 400
+    verify.evidence_hash_mismatch——全部核验通过后才落盘（拒绝零副作用）。
+    落盘 tasks/<id>/verification/ 并把引用重写为落账形态（path+sha256，无
+    content/filename 键）；path 形态引用（既有账本文件）原样通过。返回落盘
+    文件的仓内相对路径列表。"""
+    references = _evidence_reference_items(document)
+    uploads = {Path(str(name)).name: content for name, content in (evidence_uploads or {}).items()}
+    for item in references:
+        name = Path(str(item["filename"])).name
+        if name not in uploads:
+            raise PlatformError(
+                "verify.evidence_missing",
+                f"results 引用的证据未随件上传: {name}",
+                details={"filename": name},
+            )
+        actual = hashlib.sha256(uploads[name]).hexdigest()
+        if actual != item.get("sha256"):
+            raise PlatformError(
+                "verify.evidence_hash_mismatch",
+                f"上传证据字节 sha256 与 results 引用不符: {name}",
+                details={"filename": name, "expected": item.get("sha256"), "actual": actual},
+            )
     evidence_directory = task_path(repository, task_id).parent / "verification"
-    evidence_directory.mkdir(parents=True, exist_ok=True)
     extra_paths = []
-    for result in document["results"]:
-        evidence = result.get("evidence", [])
-        for index, item in enumerate(evidence):
-            if not isinstance(item, dict) or "content" not in item:
-                continue
-            target = evidence_directory / item["filename"]
-            target.write_bytes(item["content"])
-            relative = target.relative_to(repository).as_posix()
-            extra_paths.append(relative)
-            evidence[index] = {"path": relative, "sha256": item["sha256"]}
+    written = {}
+    for item in references:
+        name = Path(str(item["filename"])).name
+        if name not in written:
+            evidence_directory.mkdir(parents=True, exist_ok=True)
+            target = evidence_directory / name
+            target.write_bytes(uploads[name])
+            written[name] = target.relative_to(repository).as_posix()
+            extra_paths.append(written[name])
+        sha256 = item["sha256"]
+        item.clear()
+        item.update({"path": written[name], "sha256": sha256})
     return extra_paths
-
-
-def run_conformance_step(repository, task_id, metadata):
-    """AC-02/REQ-2：verify --execute 的 conformance 阶段——按冻结 interfaces 声明
-    对环境默认活体面（in-proc ASGI app）逐项 diff，repository 供事件对账。
-
-    interfaces 缺省/null 的任务零输出跳过（无记录、不影响其余阶段）。探测凭据
-    进程内合成：临时探测会话（user_token/session_cookie 两种运载）、为在验任务
-    现签的 sigt。返回 findings 列表（空 = 全合或跳过）。
-    """
-    _spec_directory, contract, _mapping = frozen_contract(repository, metadata)
-    interfaces = contract.get("interfaces")
-    if not interfaces:
-        return []
-    from . import authn
-    from .conformance import check_contract, configure_probes
-    from .web.app import create_app
-    probe_session = authn.create_session("conformance-probe")
-    sigt = authn.mint_sigt(task_id, "conformance-probe", str(repository))
-    app = create_app(str(Path(repository).resolve()))
-    configure_probes(user_token=probe_session, sigt=sigt, session_cookie=probe_session, task_id=task_id)
-    try:
-        return check_contract(interfaces, app, str(repository))
-    finally:
-        configure_probes()
 
 
 def evaluate_ai_review_report(repository, metadata, review_report_file):
@@ -305,10 +268,19 @@ def evaluate_ai_review_report(repository, metadata, review_report_file):
     }
 
 
-def verify_task(repository, task_id, verifier, confirmed_by, results_file=None, execute=False, manual_results_file=None, push=False, review_report_file=None, reverify=False):
+def verify_task(repository, task_id, verifier, confirmed_by, results_file=None, execute=False, manual_results_file=None, push=False, review_report_file=None, reverify=False, evidence_uploads=None):
     repository = ensure_repository(repository)
-    if (results_file is None) == (execute is False):
-        raise PlatformError("verify.invalid_mode", "provide exactly one of results_file or execute")
+    # T24/REQ-6（AC-02）：服务端 verify --execute 净室退役——execute=true 一律
+    # 400 verify.execute_retired 零副作用（状态/事件/HEAD 不变）；服务端任何模式
+    # 不再执行契约用例，机器验收迁至 operator 本机执行+上传（CLI verify --execute
+    # 新语义），verify 全路径不依赖预置 SIGNET_PLATFORM_REPO。
+    if execute:
+        raise PlatformError(
+            "verify.execute_retired",
+            "服务端净室执行已退役：机器验收由 operator 本机执行并经 results 上传，execute=true 不再接受",
+        )
+    if results_file is None:
+        raise PlatformError("verify.invalid_mode", "results file is required (execute mode is retired)")
     lock = lifecycle_lock(repository)
     code_worktree_env_set = False
     try:
@@ -325,33 +297,10 @@ def verify_task(repository, task_id, verifier, confirmed_by, results_file=None, 
                 raise PlatformError("verify.invalid_state", "only an Implemented task can be verified", exit_code=3, details={"state": state})
         elif state != "Implemented":
             raise PlatformError("verify.invalid_state", "only an Implemented task can be verified", exit_code=3, details={"state": state})
-        # AC-03（api-remote-ready）：verify --execute 业务前置——重算钉扎三件套
-        # 字节对 spec_pin，篡改件不进入净室（c7.spec_tampered + 安全事件）。
+        # AC-03（api-remote-ready）：verify 业务前置——重算钉扎三件套
+        # 字节对 spec_pin，篡改件不进入验收（c7.spec_tampered + 安全事件）。
         verify_frozen_integrity(repository, metadata, verifier, entrypoint="operator")
-        # T18（REQ-6）：源 pin 对账 → 精确源副本 + 预合并。全部既有门（spec
-        # integrity/机测/角色分离/conformance/ai_review/人工）都在对账之后执行。
-        code_verification = None
-        if code_context:
-            project_id, _record = code_context
-            pinned = codeflow.reconcile_source_pin(metadata, codeflow.latest_submitted_code(task_log(repository, task_id)))
-            code_verification = codeflow.build_code_verification(project_id, task_id, pinned)
-            os.environ["SIGNET_CODE_WORKTREE"] = code_verification["worktree"]
-            code_worktree_env_set = True
-        if execute:
-            # 净室用例经 HTTP 回调本服务并合法触发 reject/adjudicate/verify 等生命周期
-            # 动词（T16 冻结案即如此，且须按其语义响应），用例执行期间不得持有全仓
-            # 生命周期锁：释放锁执行净室，落账前重新获取并复核任务未被并发改动。
-            lock.unlink(missing_ok=True)
-            try:
-                document = build_executed_document(repository, metadata, verifier, manual_results_file, review_report_file=review_report_file)
-            finally:
-                lock = lifecycle_lock_wait(repository)
-            fresh_metadata, _ = read_task(path)
-            if fresh_metadata.get("state") != metadata.get("state") or fresh_metadata.get("spec_pin") != metadata.get("spec_pin"):
-                raise PlatformError("verify.invalid_state", "task changed while verification cases were executing", details={"state": fresh_metadata.get("state")})
-            metadata = fresh_metadata
-        else:
-            document = load_json_document(results_file, "verify.invalid_results")
+        document = load_json_document(results_file, "verify.invalid_results")
         if document.get("verifier") != verifier:
             raise PlatformError("verify.actor_mismatch", "results verifier must match the verify actor")
         validate_verification_results(repository, metadata, document)
@@ -363,18 +312,23 @@ def verify_task(repository, task_id, verifier, confirmed_by, results_file=None, 
         implementer = latest_claim_implementer(repository, task_id)
         if implementer and (verifier == implementer or confirmed_by == implementer):
             raise PlatformError("verify.self_review", "implementer cannot verify or confirm their own work")
-        if execute:
-            findings = run_conformance_step(repository, task_id, metadata)
-            if findings:
-                raise PlatformError(
-                    findings[0]["code"],
-                    "conformance check failed against the live surface",
-                    details={"findings": findings},
-                )
-        # AC-01 阶段序：机测用例 → 既有门 → conformance → ai_review → 落证 → Verified。
-        review_input = document.pop("_review_report_file", None) if execute else review_report_file
-        ai_review = evaluate_ai_review_report(repository, metadata, review_input)
-        extra_paths = materialize_machine_evidence(repository, task_id, document) if execute else []
+        # T24/REQ-6（AC-04）：code attest 对账（fail-closed，先于代码对账与任何落账；
+        # 拒绝保持 Implemented、零验收事件）。
+        codeflow.check_verify_attestation(metadata, document)
+        # T18（REQ-6）：源 pin 对账 → 精确源副本 + 预合并。全部既有门（spec
+        # integrity/结果校验/角色分离/ai_review/人工）都在对账之后执行。
+        code_verification = None
+        if code_context:
+            project_id, _record = code_context
+            pinned = codeflow.reconcile_source_pin(metadata, codeflow.latest_submitted_code(task_log(repository, task_id)))
+            code_verification = codeflow.build_code_verification(project_id, task_id, pinned)
+            os.environ["SIGNET_CODE_WORKTREE"] = code_verification["worktree"]
+            code_worktree_env_set = True
+        # AC-01 阶段序：结果校验 → 既有门 → attest 对账 → ai_review → 落证 → Verified。
+        ai_review = evaluate_ai_review_report(repository, metadata, review_report_file)
+        # T24/REQ-6（AC-03）：证据字节通道——filename 引用逐件核验随件字节后落盘
+        # tasks/<id>/verification/（拒绝零副作用）。
+        extra_paths = materialize_uploaded_evidence(repository, task_id, document, evidence_uploads)
         if ai_review is not None:
             report_bytes = ai_review.pop("_report_bytes")
             report_target = task_path(repository, task_id).parent / "verification" / "ai-review-report.json"
@@ -385,7 +339,7 @@ def verify_task(repository, task_id, verifier, confirmed_by, results_file=None, 
         metadata["updated_at"] = utc_now()
         # AC-06：verify 落账时记录工作区指纹（算法与 ship 比对共用 aidev.fingerprint）。
         recorded_fingerprint = workspace_fingerprint()
-        initial_payload = {"results": document, "executed": execute, "workspace_fingerprint": recorded_fingerprint}
+        initial_payload = {"results": document, "executed": False, "workspace_fingerprint": recorded_fingerprint}
         if ai_review is not None:
             initial_payload["ai_review"] = ai_review
         if code_verification is not None:
@@ -439,7 +393,7 @@ def reject_task(repository, task_id, category, reason, actor, workspace=None, pu
 
 
 def _close_ship_code_task(repository, task_id, metadata, body, actor, state, project_id, push):
-    """T18（REQ-7）：非内置项目 close --ship 的服务端代码入库。
+    """T18（REQ-7）+ T24（REQ-7）：代码任务 close --ship 的服务端代码入库（全项目同机制，含内置）。
 
     复核 Verified + 源 pin + 验收 merge_commit → 对账远端 main → 非强制单 ref
     push → 同一状态仓提交落 Done/task.closed/task.shipped。重复 close 幂等返回；
@@ -516,18 +470,18 @@ def close_task(repository, task_id, decision, actor, reason=None, push=False, sh
             raise PlatformError("task.not_found", f"task does not exist: {task_id}")
         metadata, body = read_task(path)
         state = metadata.get("state")
-        # T18（REQ-7）：非内置项目 close --ship 由服务端推送已验收 merge_commit，
-        # 不调用 local_git_ship、不 git add -A；不接受外部 ship_commit（消除异 commit
-        # 重入）。内置项目维持原兼容路径。
+        # T18（REQ-7）+ T24（REQ-7）：代码任务 close --ship 由服务端推送已验收
+        # merge_commit，不调用 local_git_ship、不 git add -A；T24 起 ship_commit/
+        # ship_fingerprint 输入全项目禁止（本机 ship 通道整体退役，消除异 commit 重入）。
         if ship and decision == "accept":
+            if ship_commit or ship_fingerprint:
+                raise PlatformError(
+                    "close.ship_input_forbidden",
+                    "close --ship 入库由服务端推送已验收 merge_commit；不接受外部 ship_commit/ship_fingerprint 输入",
+                )
             code_context = codeflow.code_task_context(repository, metadata)
             if code_context:
                 project_id, _record = code_context
-                if ship_commit or ship_fingerprint:
-                    raise PlatformError(
-                        "close.ship_input_forbidden",
-                        "project close --ship ships the verified merge_commit; external ship inputs are not accepted",
-                    )
                 return _close_ship_code_task(repository, task_id, metadata, body, actor, state, project_id, push)
         # close --ship 允许从 Implemented 一步关闭（AC-07：编排直通流无独立 verify 站）；
         # 常规 close 仍要求 Verified。
@@ -565,8 +519,9 @@ def ship_task(repository, task_id, actor, commit_hash, fingerprint, push=False):
     """Done 任务的 ship 落账（AC-03/AC-04）：指纹比对、同 commit 幂等、异 commit 冲突拒绝。
 
     git add/commit/push 的本机副作用由 CLI 侧执行（AC-05），本函数只做权威事件记录。
-    T18（REQ-7）：非内置项目的入库通道只有 close --ship（服务端推送已验收
-    merge_commit），既有 POST /ship → 409 ship.use_close。
+    T18（REQ-7）+ T24（REQ-7）：项目任务（含内置）的入库通道只有 close --ship
+    （服务端推送已验收 merge_commit），POST /ship → 409 ship.use_close；仅无项目仓
+    的遗留编排路径（仓无 project.json/注册表记录）保留本端点旧语义。
     """
     repository = ensure_repository(repository)
     from . import projects as project_store
@@ -574,10 +529,10 @@ def ship_task(repository, task_id, actor, commit_hash, fingerprint, push=False):
     ship_project_id = project_store.project_id_for_repository(repository)
     if ship_project_id:
         ship_record = project_store.get_project(ship_project_id)
-        if ship_record is not None and not ship_record.get("builtin"):
+        if ship_record is not None:
             raise PlatformError(
                 "ship.use_close",
-                "非内置项目必须经 close --ship 入库（服务端推送已验收 merge_commit），POST /ship 不适用于项目任务",
+                "项目任务（含内置）必须经 close --ship 入库（服务端推送已验收 merge_commit），POST /ship 不适用于项目任务",
                 exit_code=3,
             )
     if not commit_hash or not commit_hash.strip():
