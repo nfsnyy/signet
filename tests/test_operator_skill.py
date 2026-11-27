@@ -31,6 +31,8 @@ def documented_operator_verbs(body):
 
 
 class OperatorSkillComplianceTests(unittest.TestCase):
+    layer = "quick"
+
     @classmethod
     def setUpClass(cls):
         if not SKILL_PATH.is_file():
@@ -55,6 +57,8 @@ class OperatorSkillComplianceTests(unittest.TestCase):
 
 
 class OperatorSkillDriftTests(unittest.TestCase):
+    layer = "quick"
+
     @classmethod
     def setUpClass(cls):
         cls.text = SKILL_PATH.read_text(encoding="utf-8")
@@ -96,6 +100,12 @@ class OperatorSkillDriftTests(unittest.TestCase):
     def test_reconcile_checklist_documented(self):
         for token in ("一案一行", "sha256", "__pycache__"):
             self.assertIn(token, self.body)
+        # T26/REQ-2 layering_wording 防漂移锚：§7.10 分层口径落定措辞
+        # （并入既有用例——快速层 34 案钉扎，新增测试方法会破钉扎计数）。
+        layering_wording = ("快速层全绿 + 集成层影响面关联子集", "定时/发布/重大核心变更")
+        for token in layering_wording:
+            self.assertIn(token, self.body)
+        self.assertNotIn("随 #54 立项后修订三件套编写规范", self.body)
 
     def test_freeze_door_semantics_documented(self):
         self.assertIn("Implemented 未钉扎", self.body)

@@ -24,6 +24,8 @@ from aidev import projects
 
 
 class CloneMaintenanceTests(WorkflowTestCase):
+    layer = "quick"
+
     def make_bare(self, name):
         remote = self.path(name)
         subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(remote)],

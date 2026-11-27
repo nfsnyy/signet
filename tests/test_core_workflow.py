@@ -8,6 +8,8 @@ except ImportError:
 
 
 class CoreWorkflowTests(WorkflowTestCase):
+    layer = "integration"
+
     def test_draft_task_cannot_be_claimed(self):
         repository, _ = self.init_state_repo()
         workspace, task_id, _ = self.init_task(repository, "draft")

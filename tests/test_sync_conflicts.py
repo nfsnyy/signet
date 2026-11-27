@@ -5,6 +5,8 @@ except ImportError:
 
 
 class SyncConflictTests(WorkflowTestCase):
+    layer = "integration"
+
     def push_external_commit(self, remote, name):
         clone = self.path(name)
         self.git(["init", "-b", "main", clone])

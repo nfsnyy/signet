@@ -8,6 +8,8 @@ except ImportError:
 
 
 class VetoTests(WorkflowTestCase):
+    layer = "integration"
+
     def veto_artifacts(self, task_id, safety_strength="safety-veto", safety_text="安全否决项：不得记录敏感信息", must_text="功能正确"):
         artifacts = self.path(f"artifacts-veto-{task_id}")
         card = artifacts / "acceptance-card.json"

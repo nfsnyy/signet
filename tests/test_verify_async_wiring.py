@@ -17,6 +17,8 @@ except ImportError:
 
 
 class VerifyAsyncWiringTests(WorkflowTestCase):
+    layer = "integration"
+
     def test_verify_execute_keeps_service_responsive(self):
         repository, _ = self.init_state_repo()
         # 净室 allowed_env 从 CLI 进程环境取值（T24 起用例在 CLI 侧本机执行）；

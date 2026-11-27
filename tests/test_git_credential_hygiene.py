@@ -23,6 +23,8 @@ from aidev import gitrepo, projects
 
 
 class GitCredentialHygieneTests(WorkflowTestCase):
+    layer = "quick"
+
     def make_bare(self, name):
         remote = self.path(name)
         subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(remote)],

@@ -8,6 +8,8 @@ except ImportError:
 
 
 class ProjectTests(WorkflowTestCase):
+    layer = "integration"
+
     def test_project_metadata_and_event_stamping(self):
         repository = self.path("proj-repo")
         result = self.operator([

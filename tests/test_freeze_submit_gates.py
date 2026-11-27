@@ -7,6 +7,8 @@ except ImportError:
 
 
 class FreezeSubmitGateTests(WorkflowTestCase):
+    layer = "integration"
+
     def setUp(self):
         super().setUp()
         self.repository, _ = self.init_state_repo()

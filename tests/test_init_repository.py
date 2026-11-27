@@ -8,6 +8,8 @@ except ImportError:
 
 
 class InitRepositoryTests(WorkflowTestCase):
+    layer = "integration"
+
     def test_init_on_pre_created_git_repository(self):
         repository = self.path("precreated-repo")
         repository.mkdir(parents=True)

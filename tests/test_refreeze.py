@@ -16,6 +16,8 @@ SPEC_KEYS = {
 
 
 class RefreezeTests(WorkflowTestCase):
+    layer = "integration"
+
     def revised_artifacts(self, task_id, criterion_text="修订后的标准"):
         artifacts = self.path(f"artifacts-v2-{task_id}")
         card = artifacts / "acceptance-card.json"

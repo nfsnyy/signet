@@ -8,6 +8,8 @@ except ImportError:
 
 
 class LifecycleTests(WorkflowTestCase):
+    layer = "integration"
+
     def verification_document(self, repository, task_id, verifier, passed=True):
         metadata, _ = self.read_task(Path(repository) / "tasks" / task_id / "task.md")
         return {

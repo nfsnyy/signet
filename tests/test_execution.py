@@ -9,6 +9,8 @@ except ImportError:
 
 
 class ExecutionAndBaselineTests(WorkflowTestCase):
+    layer = "integration"
+
     def write_executable_contract(self, name, command, stdout_contains, contract_type="target", fixture_text=None):
         artifacts = self.path(f"{name}-artifacts")
         fixture = artifacts / "fixtures" / "hello.txt"

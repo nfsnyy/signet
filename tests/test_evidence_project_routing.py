@@ -29,6 +29,8 @@ EVIDENCE_BYTES = b"t19-real-walkthrough-proof\x00\xac09\r\n"
 
 
 class EvidenceProjectRoutingTests(WorkflowTestCase):
+    layer = "integration"
+
     def setUp(self):
         super().setUp()
         self.bound = self.path("bound-state")

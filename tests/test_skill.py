@@ -72,6 +72,8 @@ def documented_agent_verbs(body):
 
 
 class SkillComplianceTests(unittest.TestCase):
+    layer = "quick"
+
     @classmethod
     def setUpClass(cls):
         if not SKILL_PATH.is_file():
@@ -93,6 +95,8 @@ class SkillComplianceTests(unittest.TestCase):
 
 
 class SkillDriftTests(unittest.TestCase):
+    layer = "quick"
+
     @classmethod
     def setUpClass(cls):
         cls.text = SKILL_PATH.read_text(encoding="utf-8")
@@ -118,6 +122,11 @@ class SkillDriftTests(unittest.TestCase):
     def test_report_sections_documented(self):
         for section in domain.REPORT_SECTIONS:
             self.assertIn(f'"{section}"', self.body)
+        # T26/REQ-2 layering_wording 防漂移锚：§6.2 收尾回归分层口径条款
+        # （并入既有用例——快速层 34 案钉扎，新增测试方法会破钉扎计数）。
+        layering_wording = ("快速层全绿 + 集成层影响面关联子集", "定时/发布/重大核心变更", "除非卡面另有钉名")
+        for token in layering_wording:
+            self.assertIn(token, self.body)
 
     def test_actor_alias_regex_matches_domain(self):
         pattern = domain.ACTOR_PATTERN.pattern

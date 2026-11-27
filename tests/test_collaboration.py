@@ -9,6 +9,8 @@ except ImportError:
 
 
 class CollaborationTests(WorkflowTestCase):
+    layer = "integration"
+
     def two_frozen_tasks(self, prefix="collab"):
         repository, _ = self.init_state_repo()
         workspace_a, task_a, _ = self.init_task(repository, f"{prefix}-a")

@@ -22,6 +22,8 @@ from aidev.web.app import create_app
 
 
 class GlobalTaskLocationBoundaryTests(WorkflowTestCase):
+    layer = "integration"
+
     def setUp(self):
         super().setUp()
         self.bound = self.path("bound-state")
