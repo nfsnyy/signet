@@ -323,19 +323,23 @@ def reconcile_source_pin(metadata, submitted_code):
     return pinned
 
 
-def check_verify_attestation(metadata, document):
-    """T24/REQ-6（AC-04）：verify results 的 code attest 段对账（fail-closed）。
+def check_verify_attestation(metadata, document, code_context=None):
+    """T24/REQ-6（AC-04）+ T27/REQ-6（#55）：verify results 的 code attest 段对账（fail-closed）。
 
-    - 显式 code_class=true 任务：results 必携恰三键 code 段（code_repo_id/branch/
-      commit_hash 非空字符串），缺失/畸形 → 400 verify.code_attestation_required；
-      与 code_submission 钉扎不符 → 409 verify.source_commit_mismatch（保持
-      Implemented、零验收事件）。
+    - 显式 code_class=true 且闭环（code_task_context 非空，T27/REQ-6：builtin 无
+      code_repo 豁免——required 判定与 code_task_context 对齐）的任务：results 必携
+      恰三键 code 段（code_repo_id/branch/commit_hash 非空字符串），缺失/畸形 →
+      400 verify.code_attestation_required；与 code_submission 钉扎不符 → 409
+      verify.source_commit_mismatch（保持 Implemented、零验收事件）。
+    - builtin 无 code_repo 的任务即使显式 code_class=true：豁免 attest（verify
+      results 无 code 段全链路可验收），但携 code 段仍 400
+      verify.code_attestation_unexpected（不能携的禁携）。
     - 迁移视同 true 的任务（旗标缺席）：attest 随件则同口径对账，缺席走 T18 旧径
       （在飞任务行为不变）。
     - 非代码任务携 code 段 → 400 verify.code_attestation_unexpected（防误钉）。
     返回随件 attest（无则 None）；拒绝先于任何账本副作用。"""
     attestation = document.get("code")
-    required = explicit_code_class(metadata)
+    required = explicit_code_class(metadata) and code_context is not None
     if attestation is None:
         if required:
             raise PlatformError(

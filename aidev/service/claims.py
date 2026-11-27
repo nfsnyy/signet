@@ -43,6 +43,9 @@ def claim_authoritative(repository, task_id, actor):
     用于携带凭据、不带工作区的编排请求；经典提案模式（claim）保持不变。
     允许 Ready 或 Draft（T6 编排预冻结领取：仅无工作区路径，任务进入
     In Progress 并签发 sigt；带工作区的提案式 claim 仍要求 Ready）。
+    T27/REQ-3（#53）：响应在既有六键上恰增 package 一键，与 claim_with_sigt
+    任务包同源同构（同一 build_task_package），T18 编排夹具直取
+    package.metadata.spec_pin。
     """
     repository = ensure_repository(repository)
     path = task_path(repository, task_id)
@@ -83,6 +86,7 @@ def claim_authoritative(repository, task_id, actor):
         "state": metadata["state"],
         "lease": metadata["lease"],
         "handoff_token": mint_sigt(task_id, actor, sigt_repo_field(repository)),
+        "package": build_task_package(repository, metadata, body),
         "authoritative": True,
         "commit": commit,
     }

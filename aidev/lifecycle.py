@@ -312,9 +312,11 @@ def verify_task(repository, task_id, verifier, confirmed_by, results_file=None, 
         implementer = latest_claim_implementer(repository, task_id)
         if implementer and (verifier == implementer or confirmed_by == implementer):
             raise PlatformError("verify.self_review", "implementer cannot verify or confirm their own work")
-        # T24/REQ-6（AC-04）：code attest 对账（fail-closed，先于代码对账与任何落账；
-        # 拒绝保持 Implemented、零验收事件）。
-        codeflow.check_verify_attestation(metadata, document)
+        # T24/REQ-6（AC-04）+ T27/REQ-6（#55）：code attest 对账（fail-closed，先于
+        # 代码对账与任何落账；拒绝保持 Implemented、零验收事件）。required 判定与
+        # code_task_context 对齐：:292 的 code_context 非空（闭环）才必索，
+        # builtin 无 code_repo 豁免 attest。
+        codeflow.check_verify_attestation(metadata, document, code_context=code_context)
         # T18（REQ-6）：源 pin 对账 → 精确源副本 + 预合并。全部既有门（spec
         # integrity/结果校验/角色分离/ai_review/人工）都在对账之后执行。
         code_verification = None
